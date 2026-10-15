@@ -1,14 +1,14 @@
 """The weekly report as a LangGraph graph.
 
-    resolve -> market -> stock_data -> portfolio -> documents -> write_notes -> check_notes
-                                                                    ^              |
-                                                                    +---retry------+
-                                                       -> write_summary -> check_summary -> assemble
+    resolve -> market -> stock_data -> portfolio -> rules -> memory_load -> investigate
+         -> write_notes <-> check_notes -> guardrails -> compare -> write_summary <-> check_summary
+         -> save_memory -> assemble
 
-Code gathers every fact (no model involved) and records it in the ledger. The model is used at exactly
-two nodes, write_notes and write_summary, and each result goes through the verifier. When a note
-contains a figure no tool returned, the node is re-run once with the problems listed; whatever is
-still unsupported is tagged [unverified] in the report instead of being passed off as fact.
+Code gathers every fact (no model involved) and records it in the ledger. Rules turn facts into FLAGS;
+flags decide what the research agent (the `investigate` node) looks into. The model writes at three
+places (investigate, write_notes, write_summary) and everything it writes is verified. A note with a
+figure no tool returned is re-run once with the problems listed; whatever is still unsupported is tagged
+[unverified]. Hard rules act as guardrails: the model may be more cautious than a rule, never less.
 """
 import json
 import re
@@ -22,6 +22,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agent import ledger
 from agent.verify import annotate, verify_answer
+from pipeline import investigator as inv
+from pipeline import memory as mem
+from pipeline import rules as rl
 from pipeline.llm import AllModelsFailed
 from tools.portfolio import summarize_portfolio
 from tools.stocks import volatility_bucket
@@ -40,6 +43,13 @@ class ReportState(TypedDict, total=False):
     facts: dict
     portfolio: dict
     passages: dict
+    flags: dict
+    portfolio_flags: list
+    previous: dict
+    triage: dict
+    investigations: list
+    guardrails: list
+    changes: list
     notes: list
     notes_attempt: int
     notes_problems: list
@@ -62,6 +72,8 @@ class Toolbox:
     news: Callable[[str], dict]
     regime: Callable[[], dict]
     sector_of: Callable[[str], str]
+    fundamentals: Callable = None      # (symbol) -> get_fundamentals-style dict (used by the research agent)
+    risk: Callable = None              # (symbol) -> get_risk-style dict
 
 
 def default_toolbox():
@@ -77,6 +89,8 @@ def default_toolbox():
         news=lambda sym: t["get_stock_news"](ticker_or_name=sym),
         regime=lambda: t["get_market_regime"](),
         sector_of=lambda sym: lookup_sector(sym)["sector"],
+        fundamentals=lambda sym: t["get_fundamentals"](ticker=sym),
+        risk=lambda sym: t["get_risk"](ticker=sym),
     )
 
 
@@ -154,8 +168,21 @@ def _facts_text(state):
             lines.append(f"  - Versus its sector over 1 month: {abs(f['vs_sector_1m'])} percentage points {ahead} the benchmark")
         for h in f.get("headlines", []):
             lines.append(f"  - Headline: {h}")
-        for p in state.get("passages", {}).get(r["symbol"], []):
-            lines.append(f"  - Document [{p['id']}] ({p['source']}): {p['text'][:400]}")
+        for fl in state.get("flags", {}).get(r["symbol"], []):
+            lines.append(f"  - Rule flag ({fl['kind']}, {fl['severity']}): {fl['title']}. {fl['detail']}")
+        last = (state.get("previous") or {}).get("stocks", {}).get(r["symbol"])
+        if last:
+            lines.append(f"  - Last report's decision for this stock: {last.get('action')}")
+        for invs in (i for i in state.get("investigations", []) if i["symbol"] == r["symbol"]):
+            lines.append(f"  - Research question: {invs['question']}")
+            for fd in invs["findings"]:
+                cite = ("[" + ", ".join(fd["evidence"]) + "]") if fd["evidence"] else "[no evidence]"
+                lines.append(f"  - Research finding {cite}: {fd['claim']}")
+            for e in invs["evidence"]:
+                lines.append(f"  - Evidence [{e['id']}] ({e['tool']}{', ' + e['source'] if e.get('source') else ''}): {e['text'][:350]}")
+    for pf in state.get("portfolio_flags", []):
+        lines.append("")
+        lines.append(f"PORTFOLIO FLAG ({pf['severity']}): {pf['title']}. {pf['detail']}")
     return "\n".join(lines)
 
 
@@ -181,7 +208,9 @@ Rules:
   generic praise.
 - Write every metric by its plain name exactly as labelled in FACTS ("P/E ratio", "1-month price change"). Never use underscores or code-style names.
 - If a metric is missing or says "not applicable", say that plainly; do not guess it.
-- Cite a document as [D1] only if you used it."""
+- Rule flags are prompts to look closer, not instructions. Say whether the flags and research change your decision.
+- When you use a research finding or evidence, cite it as [E1]. Do not state anything the research does not show.
+- A finding marked "[no evidence]" or saying the documents do not explain something means the cause is unknown: say so."""
 
 
 def _summary_prompt(state, problems=None):
@@ -198,7 +227,9 @@ Largest sector: {c['largest_sector']} at {c['largest_sector_pct']}% of the portf
 Largest holding: {c['top_holding_name']} at {c['top_holding_pct']}% of the portfolio
 Portfolio beta (value-weighted): {p['beta_value_weighted']}
 Decisions: {decisions}
-Data notes: {'; '.join(p['data_quality']) or 'none'}"""
+Data notes: {'; '.join(p['data_quality']) or 'none'}
+Portfolio flags: {'; '.join(f['title'] + ': ' + f['detail'] for f in state.get('portfolio_flags', [])) or 'none'}
+{mem.summarize_changes(state.get('changes', []), (state.get('previous') or {}).get('date', '')) or 'Changes since last report: none (or first report)'}"""
     fix = ""
     if problems:
         fix = ("\nYOUR PREVIOUS ANSWER HAD PROBLEMS: " + "; ".join(problems[:8]) +
@@ -213,10 +244,25 @@ Copy figures exactly as shown in FACTS. No bullet points, no headings, no field 
 
 # --------------------------------------------------------------------------- the graph
 
-def build_graph(toolbox=None, llm=None, kb=None, today=None):
-    """Compile the report graph. llm=None produces a data-only report (no model calls at all)."""
+def _search(kb, query, symbol):
+    """Works with the LlamaIndex DocumentIndex (company-scoped) and the simple keyword KnowledgeBase."""
+    try:
+        return kb.search(query, k=3, symbol=symbol)
+    except TypeError:
+        return kb.search(query, k=3)
+
+
+def build_graph(toolbox=None, llm=None, kb=None, today=None, memory=None, investigate=True,
+                max_stocks=2, max_tool_calls=2):
+    """Compile the report graph.
+
+    llm=None gives a data-only report (no model calls). `kb` is a document index (see pipeline/rag.py),
+    `memory` a pipeline.memory.Memory. The research agent makes at most 1 + max_stocks*(max_tool_calls+1)
+    model requests; investigate=False skips it.
+    """
     tb = toolbox or default_toolbox()
-    stamp = (today or date.today()).isoformat()
+    day = today or date.today()
+    stamp = day.isoformat()
 
     def resolve(state):
         ledger.reset()                      # the verifier must only see THIS run's facts
@@ -306,20 +352,62 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None):
         ledger.record("summarize_portfolio", {}, ledger_view)
         return {"portfolio": summary, "facts": facts}
 
-    def documents(state):
-        passages = {}
-        if kb is not None and len(kb):
-            n = 0
-            for r in state["resolved"]:
-                hits = kb.search(f"{r['company']} {r['symbol']} outlook risks margins guidance", k=2)
-                if hits:
-                    items = []
-                    for h in hits:
-                        n += 1
-                        items.append({"id": f"D{n}", "source": h["source"], "page": h.get("page"), "text": h["text"]})
-                    passages[r["symbol"]] = items
-                    ledger.record("search_documents", {"symbol": r["symbol"]}, {"symbol": r["symbol"], "passages": items})
-        return {"passages": passages}
+    def rules(state):
+        flags = {}
+        for sym, f in state.get("facts", {}).items():
+            fl = rl.evaluate_stock(sym, f["snapshot"], weight_pct=f.get("weight_pct"), vs_sector_1m=f.get("vs_sector_1m"))
+            flags[sym] = [x.as_dict() for x in fl]
+            ledger.record("rules", {"symbol": sym}, {"symbol": sym, "flags": flags[sym]})
+        pf = [x.as_dict() for x in rl.evaluate_portfolio(state["portfolio"])]
+        ledger.record("rules", {"scope": "portfolio"}, {"flags": pf})
+        return {"flags": flags, "portfolio_flags": pf}
+
+    def memory_load(state):
+        return {"previous": memory.previous(day) if memory is not None else None}
+
+    def investigate_node(state):
+        if llm is None or not investigate or not state.get("flags"):
+            return {"investigations": [], "triage": {"how": "skipped", "picks": []}}
+        flags = {s: [rl.Flag(**d) for d in lst] for s, lst in state["flags"].items()}
+        companies = {r["symbol"]: r["company"] for r in state["resolved"]}
+        tools = inv.Tools(docs=(lambda q, sym: _search(kb, q, sym)) if kb is not None and len(kb) else None,
+                          news=lambda sym: tb.news(sym), fundamentals=tb.fundamentals, risk=tb.risk)
+        picks, _, how = inv.triage(llm, flags, companies, max_stocks=max_stocks)
+        results, warnings = [], list(state.get("warnings", []))
+        for pick in picks:
+            sym = pick["symbol"]
+            r = inv.investigate_stock(llm, tools, sym, companies.get(sym, sym), state["facts"][sym]["sector"],
+                                      pick["question"], flags[sym], max_tool_calls=max_tool_calls)
+            results.append(r)
+            if r["stopped"] == "model_unavailable":
+                warnings.append(f"Research on {sym} stopped early: no model answered.")
+        findings = [f for r in results for f in r["findings"]]
+        figs = dict(state.get("figures", {}))
+        figs["research"] = {"checked": len(findings), "supported": sum(f["verified"] for f in findings),
+                            "problems": sum(not f["verified"] for f in findings)}
+        used = list(state.get("model_used", []))
+        used += [f"{a['provider']}/{a['model']}" for a in getattr(llm, "attempts", []) if a.get("ok")]
+        return {"investigations": results, "triage": {"how": how, "picks": picks}, "figures": figs,
+                "warnings": warnings, "model_used": used}
+
+    def guardrails(state):
+        flags = {s: [rl.Flag(**d) for d in lst] for s, lst in state.get("flags", {}).items()}
+        notes, applied = [], []
+        for n in state.get("notes", []):
+            action, why = rl.apply_guardrails(n["action"], flags.get(n["symbol"], []))
+            if why:
+                applied.append({"symbol": n["symbol"], "from": n["action"], "to": action, "reason": why})
+                n = {**n, "model_action": n["action"], "action": action, "guardrail": why}
+            notes.append(n)
+        return {"notes": notes, "guardrails": applied}
+
+    def compare(state):
+        return {"changes": mem.diff(state.get("previous"), mem.build_record(state))}
+
+    def save_memory(state):
+        if memory is not None and state.get("notes"):
+            memory.save(mem.build_record(state), today=day)
+        return {}
 
     def _call_llm(prompt, state):
         text, meta = llm.generate(prompt, system=SYSTEM)
@@ -375,8 +463,8 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None):
 
     def route_notes(state):
         if state.get("llm_unavailable") or not state.get("notes_problems"):
-            return "write_summary"
-        return "write_summary" if state.get("notes_attempt", 1) >= MAX_ATTEMPTS else "write_notes"
+            return "guardrails"
+        return "guardrails" if state.get("notes_attempt", 1) >= MAX_ATTEMPTS else "write_notes"
 
     def write_summary(state):
         if llm is None or state.get("llm_unavailable"):
@@ -409,27 +497,34 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None):
 
     def route_summary(state):
         if state.get("llm_unavailable") or not state.get("summary_problems"):
-            return "assemble"
-        return "assemble" if state.get("summary_attempt", 1) >= MAX_ATTEMPTS else "write_summary"
+            return "save_memory"
+        return "save_memory" if state.get("summary_attempt", 1) >= MAX_ATTEMPTS else "write_summary"
 
     def assemble(state):
         return {"report_md": render_report(state, stamp)}
 
     g = StateGraph(ReportState)
     for name, fn in [("resolve", resolve), ("market", market), ("stock_data", stock_data), ("portfolio", portfolio),
-                     ("documents", documents), ("write_notes", write_notes), ("check_notes", check_notes),
-                     ("write_summary", write_summary), ("check_summary", check_summary), ("assemble", assemble)]:
+                     ("rules", rules), ("memory_load", memory_load), ("investigate", investigate_node),
+                     ("write_notes", write_notes), ("check_notes", check_notes), ("guardrails", guardrails),
+                     ("compare", compare), ("write_summary", write_summary), ("check_summary", check_summary),
+                     ("save_memory", save_memory), ("assemble", assemble)]:
         g.add_node(name, fn)
     g.add_edge(START, "resolve")
     g.add_edge("resolve", "market")
     g.add_edge("market", "stock_data")
     g.add_edge("stock_data", "portfolio")
-    g.add_edge("portfolio", "documents")
-    g.add_edge("documents", "write_notes")
+    g.add_edge("portfolio", "rules")
+    g.add_edge("rules", "memory_load")
+    g.add_edge("memory_load", "investigate")
+    g.add_edge("investigate", "write_notes")
     g.add_edge("write_notes", "check_notes")
-    g.add_conditional_edges("check_notes", route_notes, {"write_notes": "write_notes", "write_summary": "write_summary"})
+    g.add_conditional_edges("check_notes", route_notes, {"write_notes": "write_notes", "guardrails": "guardrails"})
+    g.add_edge("guardrails", "compare")
+    g.add_edge("compare", "write_summary")
     g.add_edge("write_summary", "check_summary")
-    g.add_conditional_edges("check_summary", route_summary, {"write_summary": "write_summary", "assemble": "assemble"})
+    g.add_conditional_edges("check_summary", route_summary, {"write_summary": "write_summary", "save_memory": "save_memory"})
+    g.add_edge("save_memory", "assemble")
     g.add_edge("assemble", END)
     return g.compile()
 
@@ -457,6 +552,11 @@ def render_report(state, stamp):
           f"1 month {_fmt(nifty.get('1m'), 2, '%')}, 3 months {_fmt(nifty.get('3m'), 2, '%')}. "
           f"_The regime is a simple rule on NIFTY's 1- and 3-month returns, not a forecast._", ""]
 
+    if state.get("previous"):
+        L += [f"## What changed since {state['previous'].get('date')}", ""]
+        L += [f"- {c['detail']}" for c in state.get("changes", [])] or ["- No material changes."]
+        L.append("")
+
     L += ["## Portfolio", ""]
     if p.get("holdings"):
         c = p["concentration"]
@@ -469,6 +569,8 @@ def render_report(state, stamp):
         L += [f"| {s} | {w:.1f}% |" for s, w in p["sector_allocation"].items()]
         for note in p.get("data_quality", []):
             L.append(f"\n> Data note: {note}")
+        for pf in state.get("portfolio_flags", []):
+            L.append(f"\n> ⚑ Portfolio flag ({pf['severity']}): {pf['title']}. {pf['detail']}")
     else:
         L.append("No holdings could be valued.")
     if state.get("summary_text"):
@@ -502,15 +604,38 @@ def render_report(state, stamp):
         L += [f"### {n['symbol']} — {n['action']}  ({mark})", "", n["rationale"] or "_no rationale_"]
         if n["trigger"]:
             L += ["", f"*Would change if:* {n['trigger']}"]
+        fl = state.get("flags", {}).get(n["symbol"], [])
+        if fl:
+            L += ["", "*Rule flags:* " + "; ".join(f"{'⚠' if x['kind'] == 'concern' else '✓'} {x['title']}" for x in fl)]
+        if n.get("guardrail"):
+            L += ["", f"_Guardrail: {n['guardrail']}_"]
         if f.get("benchmark_name"):
             L += ["", f"_Sector benchmark: {f['benchmark_name']}_"]
         for h in f.get("headlines", []):
             L.append(f"- {h}")
         if f.get("headlines"):
             L.append("")
-        for d in state.get("passages", {}).get(n["symbol"], []):
-            L.append(f"> [{d['id']}] {d['source']}" + (f", p.{d['page']}" if d.get("page") else "") + f": {d['text'][:220]}…")
         L.append("")
+
+    if state.get("triage"):
+        t = state["triage"]
+        L += ["## Research agent", "",
+              f"Chosen to investigate ({t.get('how')}): " + (", ".join(p['symbol'] for p in t.get("picks", [])) or "nothing"), ""]
+        for i in state.get("investigations", []):
+            L += [f"### {i['symbol']}: {i['question']}", ""]
+            for st in i["steps"]:
+                arg = ", ".join(f"{k}={v!r}" for k, v in st["args"].items())
+                L.append(f"{st['n']}. **{st['action']}**({arg})" + (f": {st['why']}" if st["why"] else "")
+                         + (f" → {', '.join(st['evidence'])}" if st["evidence"] else ""))
+            L.append("")
+            for fd in i["findings"]:
+                mark = "✓" if fd["verified"] else "⚠ " + "; ".join(fd["issues"]) + ":"
+                cite = f" [{', '.join(fd['evidence'])}]" if fd["evidence"] else ""
+                L.append(f"- {mark} {fd['claim']}{cite}")
+            for e in i["evidence"]:
+                if e["source"]:
+                    L.append(f"  > [{e['id']}] {e['source']}, p.{e['page']}: {e['text'][:260]}…")
+            L.append("")
 
     figs = state.get("figures", {})
     checked = sum(v.get("checked", 0) for v in figs.values())

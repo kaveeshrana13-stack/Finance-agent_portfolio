@@ -95,8 +95,9 @@ HOLDINGS = [{"name": "TCS", "quantity": 10, "avg_price": 3000.0},
             {"name": "HDFC Bank", "quantity": 20, "avg_price": 1500.0}]
 
 
-def run(llm, holdings=HOLDINGS, toolbox=None, kb=None):
-    graph = build_graph(toolbox or fake_toolbox(), llm, kb, today=None)
+def run(llm, holdings=HOLDINGS, toolbox=None, kb=None, investigate=False, memory=None, today=None, **kw):
+    """investigate=False keeps the older tests focused on the notes/summary flow."""
+    graph = build_graph(toolbox or fake_toolbox(), llm, kb, today=today, memory=memory, investigate=investigate, **kw)
     return graph.invoke({"holdings": holdings})
 
 
@@ -109,7 +110,7 @@ class HappyPath(unittest.TestCase):
         self.assertEqual({n["symbol"] for n in out["notes"]}, {"TCS", "TITAN", "HDFCBANK"})
         self.assertIn("Weekly portfolio report", out["report_md"])
         self.assertIn("✓ verified", out["report_md"])
-        self.assertNotIn("⚠", out["report_md"])
+        self.assertNotIn("contains unverified figures", out["report_md"])
 
     def test_sector_comparison_is_computed_by_code(self):
         out = run(ScriptedLLM([notes_json(), SUMMARY_OK]))
@@ -253,22 +254,116 @@ class Degradation(unittest.TestCase):
         self.assertNotIn("TITAN", {n["symbol"] for n in out["notes"]})
 
 
-class Documents(unittest.TestCase):
-    def test_passages_reach_the_prompt_and_the_report(self):
-        kb = KnowledgeBase([{"source": "titan_ar.txt", "page": 4,
-                             "text": "Titan jewellery outlook: studded share rising and margin guidance 14 percent"}])
-        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
-        out = run(llm, kb=kb)
-        self.assertIn("D1", llm.prompts[0])
-        self.assertIn("titan_ar.txt", out["report_md"])
-        self.assertIn("p.4", out["report_md"])
+class FakeKB:
+    def __init__(self, passages):
+        self.passages, self.queries = passages, []
 
-    def test_figure_quoted_from_a_document_is_supported(self):
-        kb = KnowledgeBase([{"source": "titan_ar.txt", "page": 4,
-                             "text": "Titan jewellery outlook: studded share rising and margin guidance of 14.5 percent"}])
-        bad = notes_json(TITAN={"rationale": "Management guides margins of 14.5 percent [D1]."})
-        out = run(ScriptedLLM([bad, SUMMARY_OK]), kb=kb)
-        self.assertTrue(next(n for n in out["notes"] if n["symbol"] == "TITAN")["verified"])
+    def __len__(self):
+        return len(self.passages)
+
+    def search(self, query, k=3, symbol=None):
+        self.queries.append((query, symbol))
+        return self.passages[:k]
+
+
+def act(action, **kw):
+    return json.dumps({"action": action, **kw})
+
+
+TRIAGE_TCS = json.dumps({"investigate": [{"symbol": "TCS", "question": "Why is ROCE declining?"}]})
+TCS_DOC = {"source": "call.pdf", "page": 8, "text": "For FY26 our operating margin was 25 percent, up 70 basis points."}
+
+
+class ResearchAgent(unittest.TestCase):
+    def script(self, finding_claim="Operating margin was 25 percent, up 70 basis points.", **notes):
+        return [TRIAGE_TCS,
+                act("search_documents", args={"query": "operating margin"}, why="margins drive ROCE"),
+                act("finish", findings=[{"claim": finding_claim, "evidence": ["E1"]}]),
+                notes_json(**notes), SUMMARY_OK]
+
+    def test_the_model_chooses_what_to_look_into_and_the_findings_reach_the_notes(self):
+        kb = FakeKB([TCS_DOC])
+        llm = ScriptedLLM(self.script())
+        out = run(llm, kb=kb, investigate=True, max_stocks=1, max_tool_calls=1)
+        self.assertEqual(len(llm.prompts), 5)                       # triage + 2 agent steps + notes + summary
+        self.assertEqual(out["triage"]["picks"][0]["symbol"], "TCS")
+        self.assertEqual(kb.queries, [("operating margin", "TCS")])  # the model's own query, scoped to the company
+        self.assertIn("Research finding [E1]", llm.prompts[3])
+        self.assertIn("Operating margin was 25 percent", llm.prompts[3])
+        self.assertIn("## Research agent", out["report_md"])
+        self.assertIn("call.pdf, p.8", out["report_md"])
+        self.assertEqual(out["figures"]["research"]["problems"], 0)
+
+    def test_an_invented_finding_is_marked_in_the_report(self):
+        llm = ScriptedLLM(self.script(finding_claim="Operating margin was 31 percent, up 70 basis points."))
+        out = run(llm, kb=FakeKB([TCS_DOC]), investigate=True, max_stocks=1, max_tool_calls=1)
+        self.assertEqual(out["figures"]["research"]["problems"], 1)
+        self.assertIn("⚠", out["report_md"].split("## Research agent")[1])
+
+    def test_the_agent_is_skipped_when_asked(self):
+        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
+        out = run(llm, investigate=False)
+        self.assertEqual(len(llm.prompts), 2)
+        self.assertEqual(out["investigations"], [])
+
+    def test_a_total_model_outage_during_research_still_gives_a_report(self):
+        llm = ScriptedLLM([AllModelsFailed([])] * 8)
+        out = run(llm, kb=FakeKB([TCS_DOC]), investigate=True)
+        self.assertIn("Weekly portfolio report", out["report_md"])
+
+
+class RulesAndGuardrails(unittest.TestCase):
+    def test_flags_are_computed_and_reach_the_prompt(self):
+        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
+        out = run(llm)
+        rules = {f["rule"] for f in out["flags"]["TCS"]}
+        self.assertIn("ROCE_DECLINING", rules)
+        self.assertIn("STOCK_CONCENTRATION", rules)                  # TCS is ~39% of this portfolio
+        self.assertIn("Rule flag (concern", llm.prompts[0])
+        self.assertIn("PORTFOLIO FLAG", llm.prompts[0])               # IT is the biggest sector
+
+    def test_add_is_blocked_on_an_over_concentrated_position(self):
+        out = run(ScriptedLLM([notes_json(TCS={"action": "ADD"}), SUMMARY_OK]))
+        tcs = next(n for n in out["notes"] if n["symbol"] == "TCS")
+        self.assertEqual(tcs["action"], "HOLD")
+        self.assertEqual(tcs["model_action"], "ADD")
+        self.assertEqual(out["guardrails"][0]["symbol"], "TCS")
+        self.assertIn("Guardrail", out["report_md"])
+
+    def test_guardrails_never_turn_a_cautious_call_into_a_bolder_one(self):
+        out = run(ScriptedLLM([notes_json(TCS={"action": "REDUCE"}), SUMMARY_OK]))
+        self.assertEqual(next(n for n in out["notes"] if n["symbol"] == "TCS")["action"], "REDUCE")
+        self.assertEqual(out["guardrails"], [])
+
+    def test_a_figure_from_a_flag_detail_is_a_supported_fact(self):
+        text = {"rationale": "TCS is 39.05% of the portfolio, above 20%, so size matters here."}
+        out = run(ScriptedLLM([notes_json(TCS=text), SUMMARY_OK]))
+        self.assertTrue(next(n for n in out["notes"] if n["symbol"] == "TCS")["verified"])
+
+
+class WeekOverWeek(unittest.TestCase):
+    def test_second_run_reports_what_changed(self):
+        import tempfile
+        from datetime import date
+        from pipeline.memory import Memory
+        with tempfile.TemporaryDirectory() as d:
+            mem = Memory(Path(d) / "runs.json")
+            run(ScriptedLLM([notes_json(), SUMMARY_OK]), memory=mem, today=date(2026, 10, 9))
+            second = run(ScriptedLLM([notes_json(TITAN={"action": "REDUCE"}), SUMMARY_OK]), memory=mem,
+                         today=date(2026, 10, 16))
+            self.assertEqual(second["previous"]["date"], "2026-10-09")
+            kinds = {(c["type"], c["symbol"]) for c in second["changes"]}
+            self.assertIn(("action_changed", "TITAN"), kinds)
+            self.assertIn("## What changed since 2026-10-09", second["report_md"])
+            self.assertIn("TITAN changed from REVIEW to REDUCE", second["report_md"])
+            self.assertEqual(len(mem.load()), 2)
+
+    def test_first_run_has_no_comparison_section(self):
+        import tempfile
+        from pipeline.memory import Memory
+        with tempfile.TemporaryDirectory() as d:
+            out = run(ScriptedLLM([notes_json(), SUMMARY_OK]), memory=Memory(Path(d) / "r.json"))
+            self.assertNotIn("What changed since", out["report_md"])
 
 
 class Fallback(unittest.TestCase):
