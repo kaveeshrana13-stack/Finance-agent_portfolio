@@ -1,1 +1,14 @@
 /.env
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# generated
+reports/
+
+memory/
+
+knowledge/.index/
+knowledge/**/.index/

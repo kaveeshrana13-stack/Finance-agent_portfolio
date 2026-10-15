@@ -9,15 +9,25 @@ import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Try to import yfinance
-YFINANCE_AVAILABLE = False
-try:
-    import warnings
-    warnings.filterwarnings('ignore', category=DeprecationWarning)
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except Exception:
-    YFINANCE_AVAILABLE = False
+# Plain-Python data tools (no Streamlit / LLM) live in tools/
+from tools._yf import YFINANCE_AVAILABLE
+from tools.tickers import clean_ticker_symbol
+from tools.resolver import resolve_stock
+from tools.news import get_stock_news
+from tools.sector_map import lookup_sector
+from tools.market import (
+    fetch_index_returns,
+    classify_market_regime,
+)
+from tools.stocks import fetch_stock_metrics_yf
+from tools.sectors import POLICY_NARRATIVES, get_sector_narrative
+from tools.metric_help import METRIC_EXPLANATIONS, get_metric_help
+from tools.portfolio import (
+    empty_portfolio_df,
+    smart_detect_csv_columns,
+    compute_portfolio_metrics,
+    summarize_portfolio,
+)
 
 # Global setup
 load_dotenv()
@@ -76,447 +86,46 @@ def get_profile_summary():
 SYSTEM_PROMPT = """You are a Personal Finance Agent for India. Help users make better financial decisions safely.
 Current profile: {PROFILE_SUMMARY}"""
 
-# ISSUE 5 FIX: Add news fetching function with web search capability
 def fetch_stock_news(stock_name, ticker, sector):
-    """Fetch recent news about stock, sector, or related government policies using AI with search"""
-    
-    # ISSUE 2 FIX: Use web search to get actual latest news
+    """Recent Moneycontrol headlines for a stock, summarised by Gemini from those headlines only.
+
+    The headlines come from tools.news (real, dated, linked). Gemini is only asked to summarise
+    what it is given, citing headline numbers; with no headlines it is not called at all.
+    """
+    news = get_stock_news(ticker or stock_name, company_name=stock_name)
+    data = news["data"]
+
+    if news["status"] == "error":
+        return (f"News is unavailable right now ({'; '.join(news['warnings'])}). "
+                f"Try Moneycontrol directly for {stock_name}.")
+
+    items = data["items"]
+    if not items:
+        return (f"No Moneycontrol headlines mentioning {stock_name} in the last {data['window_days']} days. "
+                "That means nothing was published, not that nothing happened.")
+
+    numbered = "\n".join(f"{n}. [{it['date']}] {it['title']}" for n, it in enumerate(items, 1))
+    summary = ""
     try:
-        # Use Gemini's built-in search capability or construct a search query
-        from datetime import datetime, timedelta
-        
-        # Calculate date range for recent news
-        today = datetime.now()
-        week_ago = today - timedelta(days=7)
-        
-        search_query = f"{stock_name} {ticker} news India stock market {today.strftime('%B %Y')}"
-        
         analyzer = genai.GenerativeModel("gemini-2.5-flash")
-        
-        prompt = f"""You are a financial news analyst. Search the web for the MOST RECENT news about:
+        prompt = f"""Summarise what these recent headlines about {stock_name} ({ticker}) mean for the stock.
 
-Stock: {stock_name} ({ticker})
-Sector: {sector}
-Current Date: {today.strftime('%B %d, %Y')}
+Headlines (the only information you may use):
+{numbered}
 
-IMPORTANT: Only report news from the last 7 days. Ignore any news older than {week_ago.strftime('%B %d, %Y')}.
-
-Search for:
-1. Company-specific news (earnings reports, announcements, deals, management changes)
-2. Sector policy changes or government regulations
-3. Major industry developments affecting this stock
-
-Provide a summary (max 150 words) with:
-- Date of each news item (must be within last 7 days)
-- 2-3 key headlines with dates
-- Impact assessment (positive/negative/neutral)
-- Credible sources (Moneycontrol, Economic Times, Business Standard, Reuters, Livemint)
-
-If no news found from the last 7 days, state: "No significant news developments in the past week. Stock appears stable with no major announcements."
-
-Format: Use bullet points with dates for each news item.
+Rules:
+- Use ONLY facts stated in the headlines. Do not add numbers, causes or events that are not in them.
+- Cite headline numbers like [1], [3] after each point.
+- For each point say whether it looks positive, negative or neutral for the stock.
+- Maximum 120 words. If the headlines are mostly about the wider market, say so.
 """
-        
-        response = analyzer.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return f"News search unavailable. Please check Moneycontrol.com or Google News for latest updates on {stock_name}. You can search: '{stock_name} news latest'"
-
-# Market Regime Classification
-def classify_market_regime(nifty_returns, sector_breadth_data=None):
-    """Classify current market regime based on NIFTY performance and breadth"""
-    
-    if not nifty_returns:
-        return "Unknown", "Insufficient data to classify market regime"
-    
-    nifty_1m = nifty_returns.get('1m', 0)
-    nifty_3m = nifty_returns.get('3m', 0)
-    
-    # Regime classification logic
-    if nifty_1m > 3 and nifty_3m > 8:
-        regime = "Risk-On"
-        description = "Broad market participation with strong upward momentum. Favorable for holding cyclical and growth sectors."
-    elif nifty_1m > 1 and nifty_3m > 3:
-        regime = "Selective Risk-On"
-        description = "Market showing positive momentum but participation is sector-specific. Focus on leading sectors."
-    elif abs(nifty_1m) < 2 and abs(nifty_3m) < 5:
-        regime = "Range-bound"
-        description = "Market lacks clear direction. Favor quality over momentum, reduce position sizing."
-    elif nifty_1m < -3 or nifty_3m < -8:
-        regime = "Risk-Off"
-        description = "Defensive positioning warranted. Prioritize quality, reduce cyclical exposure, raise cash."
-    else:
-        regime = "Mixed"
-        description = "Market showing mixed signals. Be selective, favor sectors with policy tailwinds."
-    
-    # ISSUE 2 FIX: Add detailed explanation of how regime is calculated
-    explanation = f"\n\n**How we calculate this regime:** Based on NIFTY 50 returns over 1 Month ({nifty_1m:+.2f}%) and 3 Months ({nifty_3m:+.2f}%). "
-    explanation += f"**Risk-On** requires 1M > +3% AND 3M > +8%. "
-    explanation += f"**Range-bound** means ±2% (1-month) and ±5% (3-month). "
-    explanation += f"**Risk-Off** triggers when 1M < -3% OR 3M < -8%."
-    
-    return regime, description + explanation
-
-# Sector Leadership Classification
-def classify_sector_leadership(sector_return, nifty_return, timeframe="1M"):
-    """Classify sector as Leading/Improving/Weakening/Lagging vs market"""
-    
-    if sector_return is None or nifty_return is None:
-        return "Unknown"
-    
-    relative_performance = sector_return - nifty_return
-    
-    if sector_return > 3 and relative_performance > 2:
-        return "Leading"
-    elif sector_return > 0 and relative_performance > 0:
-        return "Improving"
-    elif sector_return < 0 and relative_performance < -2:
-        return "Lagging"
-    elif sector_return < -3 and relative_performance < -5:
-        return "Severely Lagging"
-    else:
-        return "Neutral"
-
-# Indian Market Policy Context (Narrative Intelligence)
-POLICY_NARRATIVES = {
-    "IT": {
-        "tailwinds": ["Digital transformation spend", "AI/Cloud adoption", "GCC expansion"],
-        "headwinds": ["US recession fears", "Client budget cuts", "Wage inflation"],
-        "current_stance": "Mixed - growth visibility unclear due to global macro"
-    },
-    "Banking": {
-        "tailwinds": ["Credit growth 15%+", "NIM expansion", "Asset quality improving"],
-        "headwinds": ["RBI hawkish stance", "Deposit competition", "Unsecured loan stress"],
-        "current_stance": "Positive - structural credit cycle intact despite rate concerns"
-    },
-    "Pharma": {
-        "tailwinds": ["US generics recovery", "CDMO opportunities", "Domestic demand strong"],
-        "headwinds": ["USFDA scrutiny", "Pricing pressure", "API cost volatility"],
-        "current_stance": "Improving - regulatory overhang easing"
-    },
-    "Auto": {
-        "tailwinds": ["Rural demand pickup", "EV policy support", "Capacity additions"],
-        "headwinds": ["Commodity cost pressure", "Inventory buildup", "High interest rates"],
-        "current_stance": "Positive - festive demand strong, 2W leading"
-    },
-    "Infrastructure": {
-        "tailwinds": ["Govt capex 10L+ Cr", "PM Gati Shakti", "Order book visibility 3+ years"],
-        "headwinds": ["Execution delays", "Working capital intensity", "Land acquisition"],
-        "current_stance": "Structural Bull - Budget 2024 focus continues"
-    },
-    "FMCG": {
-        "tailwinds": ["Rural recovery", "Premiumization trend", "Pricing power"],
-        "headwinds": ["Volume growth weak", "Modern trade pressure", "Competition"],
-        "current_stance": "Stabilizing - waiting for volume growth confirmation"
-    },
-    "Energy": {
-        "tailwinds": ["Refining margins improving", "Gas demand up", "Renewable push"],
-        "headwinds": ["Crude volatility", "Subsidy burden", "Energy transition costs"],
-        "current_stance": "Neutral - watchful on crude prices"
-    },
-    "Metal": {
-        "tailwinds": ["China stimulus hopes", "India infra demand", "Capacity discipline"],
-        "headwinds": ["Global slowdown", "Steel dumping", "Power costs"],
-        "current_stance": "Cyclical bottom - early signs of recovery"
-    },
-    "Aviation": {
-        "tailwinds": ["Passenger growth 10%+", "Capacity discipline", "Fuel costs stable"],
-        "headwinds": ["Competition intensity", "Airport charges", "Regulatory uncertainty"],
-        "current_stance": "Expansion phase - demand recovery supported by capacity rationalization"
-    },
-    "Defence": {
-        "tailwinds": ["Indigenization push", "Defence budget up 13%", "Export orders growing"],
-        "headwinds": ["Long gestation orders", "Technology gaps", "Execution risk"],
-        "current_stance": "Structural theme - Atmanirbhar Bharat focus"
-    },
-    "Chemicals": {
-        "tailwinds": ["GST rationalization", "China+1 opportunity", "Specialty growth"],
-        "headwinds": ["Inventory destocking", "Chinese competition", "Agro weakness"],
-        "current_stance": "Bottom formation - GST cuts improve earnings visibility"
-    },
-    "Financial Services": {
-        "tailwinds": ["Credit growth", "Digital banking adoption", "Market share gains"],
-        "headwinds": ["Regulatory scrutiny", "Competition from fintech", "Asset quality monitoring"],
-        "current_stance": "Positive - diversified growth opportunities"
-    }
-}
-
-def get_sector_narrative(sector):
-    """Get policy and narrative context for a sector"""
-    # Map sector variations to standard names
-    sector_mapping = {
-        "Financial Services": "Financial Services",
-        "Oil & Gas": "Energy",
-        "Cement": "Infrastructure"
-    }
-    
-    normalized_sector = sector_mapping.get(sector, sector)
-    narrative = POLICY_NARRATIVES.get(normalized_sector, {
-        "tailwinds": ["Sector-specific opportunities"],
-        "headwinds": ["Sector-specific challenges"],
-        "current_stance": "Neutral - monitor for changes"
-    })
-    
-    return narrative
-
-# Ticker helpers
-def clean_ticker_symbol(symbol):
-    """Clean and normalize ticker symbol"""
-    if not symbol:
-        return None
-    symbol = str(symbol).strip().upper()
-    symbol = symbol.replace('.NS', '').replace('.BO', '')
-    symbol = re.sub(r'[^A-Z0-9&]', '', symbol)
-    return symbol if symbol else None
-
-# Fetch NIFTY 50 and sector index returns for benchmarking
-def fetch_index_returns(index_name="NIFTY 50"):
-    """Fetch weekly monthly and quarterly returns for an index"""
-    yahoo_mapping = {
-        "NIFTY 50": "^NSEI",
-        "NIFTY IT": "^CNXIT",
-        "NIFTY BANK": "^NSEBANK",
-        "NIFTY PHARMA": "^CNXPHARMA",
-        "NIFTY FMCG": "^CNXFMCG",
-        "NIFTY AUTO": "^CNXAUTO",
-        "NIFTY ENERGY": "^CNXENERGY",
-        "NIFTY METAL": "^CNXMETAL",
-        "NIFTY INFRASTRUCTURE": "^CNXINFRA"
-    }
-    
-    ticker = yahoo_mapping.get(index_name, "^NSEI")
-    
-    try:
-        if not YFINANCE_AVAILABLE:
-            return None
-        
-        index = yf.Ticker(ticker)
-        hist = index.history(period="3mo")
-        
-        if hist.empty or len(hist) < 2:
-            return None
-        
-        hist = hist.dropna(subset=['Close'])
-        
-        if len(hist) < 2:
-            return None
-        
-        current = float(hist['Close'].iloc[-1])
-        
-        returns = {}
-        
-        # One week return
-        if len(hist) >= 6:
-            week_ago = float(hist['Close'].iloc[-6])
-            oneweek = round(((current - week_ago) / week_ago) * 100, 2)
-            returns['1w'] = oneweek
-        
-        # One month return
-        if len(hist) >= 21:
-            month_ago = float(hist['Close'].iloc[-21])
-            onemonth = round(((current - month_ago) / month_ago) * 100, 2)
-            returns['1m'] = onemonth
-        
-        # Three month return
-        start = float(hist['Close'].iloc[0])
-        threemonth = round(((current - start) / start) * 100, 2)
-        returns['3m'] = threemonth
-        
-        return returns
-        
+        summary = analyzer.generate_content(prompt).text.strip()
     except Exception:
-        return None
+        summary = "_Summary unavailable; the headlines are listed below._"
 
-# Sector to index mapping
-SECTOR_TO_INDEX = {
-    "IT": "NIFTY IT",
-    "Banking": "NIFTY BANK",
-    "Pharma": "NIFTY PHARMA",
-    "FMCG": "NIFTY FMCG",
-    "Auto": "NIFTY AUTO",
-    "Energy": "NIFTY ENERGY",
-    "Metal": "NIFTY METAL",
-    "Infrastructure": "NIFTY INFRASTRUCTURE",
-    "Financial Services": "NIFTY BANK",
-    "Oil & Gas": "NIFTY ENERGY",
-    "Cement": "NIFTY INFRASTRUCTURE"
-}
-# PART 2 - Stock Metrics Fetching and AI Analysis Functions
-# This continues from Part 1
+    links = "\n".join(f"{n}. [{it['title']}]({it['link']}) — {it['date']}" for n, it in enumerate(items, 1))
+    return f"{summary}\n\n**Headlines (last {data['window_days']} days):**\n{links}"
 
-# Fetch stock metrics using yfinance
-def fetch_stock_metrics_yf(ticker):
-    """Fetch fundamental metrics using yfinance"""
-    if not YFINANCE_AVAILABLE or not ticker:
-        return None
-    
-    clean_symbol = clean_ticker_symbol(ticker)
-    if not clean_symbol:
-        return None
-    
-    # Try NSE first, then BSE
-    for exchange in ['.NS', '.BO']:
-        try:
-            symbol = f"{clean_symbol}{exchange}"
-            stock = yf.Ticker(symbol)
-            
-            # Get info
-            info = stock.info
-            
-            if not info or 'currentPrice' not in info:
-                continue
-            
-            metrics = {}
-            
-            # Price metrics
-            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
-            metrics['current_price'] = round(float(current_price), 2) if current_price else None
-            metrics['day_high'] = round(float(info.get('dayHigh', 0)), 2) if info.get('dayHigh') else None
-            metrics['day_low'] = round(float(info.get('dayLow', 0)), 2) if info.get('dayLow') else None
-            metrics['52w_high'] = round(float(info.get('fiftyTwoWeekHigh', 0)), 2) if info.get('fiftyTwoWeekHigh') else None
-            metrics['52w_low'] = round(float(info.get('fiftyTwoWeekLow', 0)), 2) if info.get('fiftyTwoWeekLow') else None
-            
-            # MOMENTUM AND TREND - Fetch historical data for weekly monthly quarterly changes
-            try:
-                hist_3m = stock.history(period="3mo")
-                if not hist_3m.empty and len(hist_3m) > 1:
-                    current = float(hist_3m['Close'].iloc[-1])
-                    
-                    # Weekly change (5 trading days)
-                    if len(hist_3m) >= 6:
-                        week_ago = float(hist_3m['Close'].iloc[-6])
-                        weekly_change = round(((current - week_ago) / week_ago) * 100, 2)
-                        metrics['1w_change_pct'] = weekly_change
-                    
-                    # Monthly change (20 trading days)
-                    if len(hist_3m) >= 21:
-                        month_ago = float(hist_3m['Close'].iloc[-21])
-                        monthly_change = round(((current - month_ago) / month_ago) * 100, 2)
-                        metrics['1m_change_pct'] = monthly_change
-                    
-                    # Quarterly change
-                    start_price = float(hist_3m['Close'].iloc[0])
-                    quarterly_change = round(((current - start_price) / start_price) * 100, 2)
-                    metrics['3m_change_pct'] = quarterly_change
-                    
-                    # Trend classification
-                    m1 = metrics.get('1m_change_pct', 0) or 0
-                    m3 = metrics.get('3m_change_pct', 0) or 0
-                    
-                    if m1 > 5 and m3 > 10:
-                        metrics['trend_label'] = "Strong Uptrend"
-                    elif m1 < -5 and m3 < -10:
-                        metrics['trend_label'] = "Downtrend"
-                    elif abs(m1) < 3 and abs(m3) < 5:
-                        metrics['trend_label'] = "Sideways"
-                    elif m1 > 0 and m3 > 0:
-                        metrics['trend_label'] = "Weak Uptrend"
-                    else:
-                        metrics['trend_label'] = "Weak Downtrend"
-                    
-                    # Volatility calculation (standard deviation of returns)
-                    returns = hist_3m['Close'].pct_change().dropna()
-                    volatility = returns.std() * (252 ** 0.5) * 100  # Annualized
-                    
-                    if volatility < 20:
-                        metrics['volatility_bucket'] = "Low"
-                    elif volatility < 40:
-                        metrics['volatility_bucket'] = "Medium"
-                    else:
-                        metrics['volatility_bucket'] = "High"
-                    
-                    metrics['volatility_pct'] = round(volatility, 2)
-                    
-            except Exception:
-                pass
-            
-            # Calculate % from 52W high/low
-            if metrics['current_price'] and metrics['52w_high']:
-                metrics['pct_from_52w_high'] = round(((metrics['current_price'] - metrics['52w_high']) / metrics['52w_high']) * 100, 2)
-                metrics['drawdown_from_high'] = abs(metrics['pct_from_52w_high'])
-            else:
-                metrics['pct_from_52w_high'] = None
-                metrics['drawdown_from_high'] = None
-                
-            if metrics['current_price'] and metrics['52w_low']:
-                metrics['pct_from_52w_low'] = round(((metrics['current_price'] - metrics['52w_low']) / metrics['52w_low']) * 100, 2)
-            else:
-                metrics['pct_from_52w_low'] = None
-            
-            # Valuation metrics
-            pe = info.get('trailingPE')
-            metrics['pe_ratio'] = round(float(pe), 2) if pe else None
-            
-            pb = info.get('priceToBook')
-            metrics['pb_ratio'] = round(float(pb), 2) if pb else None
-            
-            peg = info.get('pegRatio')
-            metrics['peg_ratio'] = round(float(peg), 2) if peg else None
-            
-            market_cap = info.get('marketCap')
-            if market_cap:
-                metrics['market_cap_cr'] = round(float(market_cap) / 10000000, 2)
-            else:
-                metrics['market_cap_cr'] = None
-            
-            # Fix dividend yield calculation
-            div_yield = info.get('dividendYield')
-            if div_yield and div_yield > 0:
-                if div_yield < 1:
-                    metrics['dividend_yield'] = round(float(div_yield) * 100, 2)
-                else:
-                    metrics['dividend_yield'] = round(float(div_yield), 2)
-            else:
-                div_rate = info.get('dividendRate')
-                current_price_val = metrics.get('current_price')
-                if div_rate and current_price_val and current_price_val > 0:
-                    metrics['dividend_yield'] = round((float(div_rate) / float(current_price_val)) * 100, 2)
-                else:
-                    metrics['dividend_yield'] = None
-            
-            # Quality & Risk metrics
-            roe = info.get('returnOnEquity')
-            metrics['roe'] = round(float(roe) * 100, 2) if roe else None
-            
-            debt = info.get('debtToEquity')
-            metrics['debt_to_equity'] = round(float(debt), 2) if debt else None
-            
-            # Beta (risk measure)
-            beta = info.get('beta')
-            metrics['beta'] = round(float(beta), 2) if beta else None
-            
-            # Earnings date proximity
-            earnings_dates = info.get('earningsTimestamp')
-            if earnings_dates:
-                from datetime import datetime, timedelta
-                earnings_dt = datetime.fromtimestamp(earnings_dates)
-                days_to_earnings = (earnings_dt - datetime.now()).days
-                
-                if abs(days_to_earnings) <= 7:
-                    metrics['earnings_proximity'] = "This week"
-                elif abs(days_to_earnings) <= 14:
-                    metrics['earnings_proximity'] = "Within 2 weeks"
-                elif days_to_earnings < 0 and abs(days_to_earnings) <= 30:
-                    metrics['earnings_proximity'] = "Recently reported"
-                else:
-                    metrics['earnings_proximity'] = "Not soon"
-            else:
-                metrics['earnings_proximity'] = "Unknown"
-            
-            # Dividend date
-            ex_div_date = info.get('exDividendDate')
-            if ex_div_date:
-                metrics['recent_dividend'] = True
-            else:
-                metrics['recent_dividend'] = False
-            
-            metrics['exchange'] = exchange
-            return metrics
-            
-        except Exception:
-            continue
-    
-    return None
 
 # AI Analysis Helper
 def analyze_stock_with_ai(stock_name, ticker, sector, metrics, user_profile, portfolio_context=None, benchmarks=None, market_regime=None, sector_narrative=None, monthly_budget=None):
@@ -537,20 +146,17 @@ Portfolio Context:
     
     # Add benchmark context
     benchmark_info = ""
-    sector_leadership = "Unknown"
     if benchmarks:
-        stock_1m = benchmarks.get('stock_1m', 0) or 0
-        nifty_1m = benchmarks.get('nifty_1m', 0) or 0
-        sector_leadership = classify_sector_leadership(benchmarks.get('sector_1m'), nifty_1m, "1M")
-        
+        sector_benchmark = benchmarks.get('sector_benchmark') or "none available"
+
         benchmark_info = f"""
 Benchmark Performance:
 - Stock: 1W: {benchmarks.get('stock_1w', 'N/A')}% | 1M: {benchmarks.get('stock_1m', 'N/A')}% | 3M: {benchmarks.get('stock_3m', 'N/A')}%
-- Sector: 1W: {benchmarks.get('sector_1w', 'N/A')}% | 1M: {benchmarks.get('sector_1m', 'N/A')}% | 3M: {benchmarks.get('sector_3m', 'N/A')}%
+- Sector ({sector_benchmark}): 1W: {benchmarks.get('sector_1w', 'N/A')}% | 1M: {benchmarks.get('sector_1m', 'N/A')}% | 3M: {benchmarks.get('sector_3m', 'N/A')}%
 - NIFTY 50: 1W: {benchmarks.get('nifty_1w', 'N/A')}% | 1M: {benchmarks.get('nifty_1m', 'N/A')}% | 3M: {benchmarks.get('nifty_3m', 'N/A')}%
 
 Relative Performance:
-- vs Sector (1M): {benchmarks.get('vs_sector_1m', 'N/A')}% - Sector is {sector_leadership}
+- vs Sector (1M): {benchmarks.get('vs_sector_1m', 'N/A')}%
 - vs NIFTY (1M): {benchmarks.get('vs_nifty_1m', 'N/A')}%
 """
     
@@ -610,7 +216,6 @@ Key Metrics:
 
 1. MARKET CONTEXT
 - Current regime: {market_regime.get('regime', 'Unknown') if market_regime else 'Unknown'}
-- Sector leadership: {sector_leadership}
 - This stock vs sector: {benchmarks.get('vs_sector_1m', 'N/A') if benchmarks else 'N/A'}%
 - This stock vs NIFTY: {benchmarks.get('vs_nifty_1m', 'N/A') if benchmarks else 'N/A'}%
 
@@ -678,37 +283,31 @@ def analyze_portfolio_with_ai(portfolio_df, user_profile, monthly_budget=None):
     """Comprehensive ACTIONABLE portfolio analysis with clear decisions"""
     analyzer = genai.GenerativeModel("gemini-2.5-flash")
     
-    # Calculate portfolio metrics
-    total_value = portfolio_df['current_value'].sum() if 'current_value' in portfolio_df.columns else 0
-    total_investment = portfolio_df['total_investment'].sum() if 'total_investment' in portfolio_df.columns else 0
-    total_pl_pct = ((total_value - total_investment) / total_investment * 100) if total_investment > 0 else 0
-    
-    # Sector concentration
-    sector_allocation = portfolio_df.groupby('sector')['current_value'].sum() / total_value * 100 if total_value > 0 else pd.Series()
-    sector_summary = "\n".join([f"- {sector}: {pct:.1f}%" for sector, pct in sector_allocation.items()])
-    
-    # Top holdings
-    portfolio_df_sorted = portfolio_df.sort_values('current_value', ascending=False)
-    top_5 = portfolio_df_sorted.head(5)
-    top_holdings_summary = "\n".join([
-        f"- {row['stock_name']}: ₹{row['current_value']:,.0f} ({row['current_value']/total_value*100:.1f}%)"
-        for _, row in top_5.iterrows()
-    ]) if total_value > 0 else "N/A"
-    
-    # Risk metrics
-    avg_beta = portfolio_df['beta'].mean() if 'beta' in portfolio_df.columns else None
-    avg_beta_str = f"{avg_beta:.2f}" if avg_beta and not pd.isna(avg_beta) else "N/A"
-    
-    high_volatility_count = len(portfolio_df[portfolio_df['volatility_bucket'] == 'High']) if 'volatility_bucket' in portfolio_df.columns else 0
-    
-    # Momentum analysis
-    uptrend_count = len(portfolio_df[portfolio_df['trend_label'].str.contains('Uptrend', na=False)]) if 'trend_label' in portfolio_df.columns else 0
-    downtrend_count = len(portfolio_df[portfolio_df['trend_label'].str.contains('Downtrend', na=False)]) if 'trend_label' in portfolio_df.columns else 0
-    
-    # Concentration risks
-    max_stock_weight = portfolio_df['portfolio_weight_pct'].max() if 'portfolio_weight_pct' in portfolio_df.columns else 0
-    max_sector_weight = sector_allocation.max() if not sector_allocation.empty else 0
-    
+    # Portfolio-level numbers come from tools.portfolio.summarize_portfolio (deterministic, tested)
+    summary = summarize_portfolio(portfolio_df)
+    total_value = summary["total_value"]
+    total_investment = summary["cost_of_priced_holdings"]
+    total_pl_pct = summary["overall_return_pct"] or 0
+
+    sector_summary = "\n".join(f"- {sector}: {pct:.1f}%" for sector, pct in summary["sector_allocation"].items())
+    top_holdings_summary = "\n".join(
+        f"- {h['name']}: ₹{h['value']:,.0f} ({h['weight_pct']:.1f}%)" for h in summary["top_holdings"]
+    ) or "N/A"
+
+    beta = summary["beta_value_weighted"]
+    avg_beta_str = f"{beta:.2f}" if beta is not None else "N/A"
+    high_volatility_count = summary["volatility"]["high_count"]
+    uptrend_count = summary["momentum"]["uptrend"]
+    downtrend_count = summary["momentum"]["downtrend"]
+    max_stock_weight = summary["concentration"]["top_holding_pct"]
+    max_sector_weight = summary["concentration"]["largest_sector_pct"]
+
+    data_quality_block = ""
+    if summary["data_quality"]:
+        data_quality_block = "\nDATA QUALITY NOTES (do not draw conclusions from the missing data):\n" + "\n".join(
+            f"- {note}" for note in summary["data_quality"]
+        )
+
     # ISSUE 4 FIX: Add monthly budget context
     budget_context = ""
     if monthly_budget:
@@ -728,11 +327,11 @@ USER PROFILE: {user_profile}{budget_context}
 
 PORTFOLIO DATA:
 - Total Value: Rs {total_value:,.0f}
-- Total Investment: Rs {total_investment:,.0f}
-- Overall Return: {total_pl_pct:+.2f} percent
+- Total Investment (holdings with a known buy price): Rs {total_investment:,.0f}
+- Overall Return (same holdings): {total_pl_pct:+.2f} percent
 - Number of Stocks: {len(portfolio_df)}
 - Largest Stock: {max_stock_weight:.1f} percent
-- Largest Sector: {max_sector_weight:.1f} percent
+- Largest Sector: {max_sector_weight:.1f} percent{data_quality_block}
 
 SECTOR ALLOCATION:
 {sector_summary}
@@ -741,7 +340,7 @@ TOP 5 HOLDINGS:
 {top_holdings_summary}
 
 PORTFOLIO CHARACTERISTICS:
-- Avg Beta: {avg_beta_str}
+- Beta (value-weighted): {avg_beta_str}
 - High Volatility Stocks: {high_volatility_count} out of {len(portfolio_df)}
 - Uptrend: {uptrend_count} | Downtrend: {downtrend_count}
 
@@ -825,7 +424,7 @@ OUTPUT STYLE RULES:
 CRITICAL RULES:
 - Concentration over 40 percent in one sector = urgent action needed
 - Concentration over 20 percent in one stock = acceptable ONLY if:
-  * Sector is Leading in current regime
+  * Sector is outperforming the market in the current regime
   * Fundamentals + momentum aligned
   * Policy tailwinds present
 - Never recommend diversify for diversification sake
@@ -842,119 +441,41 @@ Remember: This is a WEEKLY COMMAND CENTER report. Be concise, conditional, and a
     # PART 3 - Portfolio Helper Functions and Complete UI Code
 # This continues from Part 2
 
-# Metric explanations dictionary
-METRIC_EXPLANATIONS = {
-    'current_price': {
-        'name': 'Current Price',
-        'explanation': 'The latest trading price of the stock. Compare this with your average buy price to see your gains/losses.',
-        'good_range': None
-    },
-    'pe_ratio': {
-        'name': 'PE Ratio (Price-to-Earnings)',
-        'explanation': 'Shows how much investors are willing to pay for ₹1 of earnings. Lower might mean undervalued, but varies by sector. IT companies often have higher PE than Banks.',
-        'sector_context': {
-            'IT': 'Normal range: 20-30. High growth expectations.',
-            'Banking': 'Normal range: 10-20. Lower due to regulatory nature.',
-            'Pharma': 'Normal range: 25-40. R&D intensive sector.',
-            'FMCG': 'Normal range: 40-60. Stable, predictable earnings.',
-            'Auto': 'Normal range: 15-25. Cyclical industry.'
-        }
-    },
-    'pb_ratio': {
-        'name': 'PB Ratio (Price-to-Book)',
-        'explanation': 'Compares stock price to company\'s book value (assets minus liabilities). Less than 1 means trading below asset value, but this is normal for some sectors.',
-        'sector_context': {
-            'IT': 'Often >5. Asset-light, value in intangibles.',
-            'Banking': 'Normal: 1-3. Asset-heavy business.',
-            'Pharma': 'Often >3. Brand value matters.',
-            'FMCG': 'Often >5. Brand strength.',
-            'Auto': 'Normal: 2-4. Manufacturing assets.'
-        }
-    },
-    'roe': {
-        'name': 'ROE (Return on Equity)',
-        'explanation': 'Shows how efficiently company uses shareholder money to generate profits. Higher is generally better, but compare within the same sector.',
-        'sector_context': {
-            'IT': 'Strong: >25%. Asset-light model.',
-            'Banking': 'Good: >15%. Regulated industry.',
-            'Pharma': 'Good: >20%. High margin business.',
-            'FMCG': 'Strong: >25%. Stable margins.',
-            'Auto': 'Good: >15%. Capital intensive.'
-        }
-    },
-    'debt_to_equity': {
-        'name': 'Debt-to-Equity Ratio',
-        'explanation': 'Shows how much debt company has compared to shareholder equity. Infrastructure and capital-intensive sectors naturally have higher debt.',
-        'sector_context': {
-            'IT': 'Often <0.5. Low capital needs.',
-            'Banking': 'Not applicable. Debt is their business model.',
-            'Pharma': 'Good: <1. Moderate capital needs.',
-            'FMCG': 'Good: <1. Stable cash flows.',
-            'Infrastructure': 'Can be 2-3. Capital intensive.'
-        }
-    }
-}
-
-def get_metric_help(metric_key, sector=None):
-    """Get contextual help text for a metric"""
-    if metric_key not in METRIC_EXPLANATIONS:
-        return None
-    
-    info = METRIC_EXPLANATIONS[metric_key]
-    help_text = f"**{info['name']}**\n\n{info['explanation']}"
-    
-    if sector and 'sector_context' in info:
-        sector_info = info['sector_context'].get(sector)
-        if sector_info:
-            help_text += f"\n\n**For {sector} sector:** {sector_info}"
-        else:
-            help_text += f"\n\n**Sector context:** Compare with other {sector} companies."
-    
-    if info.get('good_range'):
-        help_text += f"\n\n**General guideline:** {info['good_range']}"
-    
-    return help_text
 
 # Portfolio helpers
-def empty_portfolio_df():
-    return pd.DataFrame(columns=["stock_name", "ticker", "quantity", "avg_buy_price", "sector"])
 
 def get_stock_info(stock_name):
-    """Get ticker and sector using AI"""
-    enricher = genai.GenerativeModel("gemini-2.5-flash")
-    prompt = f'Identify NSE ticker and sector for "{stock_name}". Return JSON: {{"ticker": "TCS", "sector": "IT"}}. No markdown.'
-    
-    try:
-        resp = enricher.generate_content(prompt)
-        text = resp.text.strip().strip("`").replace("json", "").strip()
-        data = json.loads(text)
-        ticker = clean_ticker_symbol(data.get("ticker", stock_name.upper()))
-        sector = data.get("sector", "Unknown")
-        return ticker, sector
-    except Exception:
-        return clean_ticker_symbol(stock_name.upper()), "Unknown"
+    """Resolve a company name/symbol to (NSE ticker, sector).
 
-def smart_detect_csv_columns(cols):
-    stock_kw = ['stock', 'name', 'symbol', 'ticker', 'company']
-    qty_kw = ['qty', 'quantity', 'shares', 'units', 'nos']
-    price_kw = ['price', 'avg', 'average', 'buy', 'cost']
-    
-    norm = {c.lower().strip().replace('_', '').replace(' ', ''): c for c in cols}
-    detected = {'stock': None, 'quantity': None, 'price': None}
-    
-    for n, o in norm.items():
-        if not detected['stock'] and any(k in n for k in stock_kw) and not any(k in n for k in qty_kw):
-            detected['stock'] = o
-        if not detected['quantity'] and any(k in n for k in qty_kw):
-            detected['quantity'] = o
-        if not detected['price'] and any(k in n for k in price_kw) and 'current' not in n:
-            detected['price'] = o
-    
-    if not detected['stock'] and cols: detected['stock'] = cols[0]
-    if not detected['quantity'] and len(cols) > 1: detected['quantity'] = cols[1]
-    if not detected['price'] and len(cols) > 2: detected['price'] = cols[2]
-    
-    return detected
+    Deterministic: the official NSE list decides the symbol and Yahoo's industry decides
+    the sector. Anything uncertain is recorded in session_state["resolution_notes"] for
+    the Portfolio Preview instead of being guessed.
+    """
+    notes = st.session_state.setdefault("resolution_notes", [])
+    res = resolve_stock(stock_name)
+
+    if res["status"] == "resolved":
+        ticker = res["symbol"]
+        if res["confidence"] != "high" or res["note"]:
+            notes.append(f"'{stock_name}' → {ticker} ({res['name']}). {res['note']}".strip())
+        return ticker, lookup_sector(ticker)["sector"]
+
+    if res["status"] == "ambiguous":
+        options = "; ".join(f"{c['symbol']} ({c['name']})" for c in res["candidates"])
+        notes.append(f"'{stock_name}' matches several companies, so it was left unresolved. "
+                     f"Re-enter it with the exact symbol. Options: {options}")
+        return "", "Unknown"
+
+    # Not in the NSE list. If it looks like a bare symbol (e.g. a BSE-only listing), let
+    # Yahoo try it directly; otherwise leave it unresolved rather than guess from a name.
+    candidate = str(stock_name).strip()
+    if re.fullmatch(r"[A-Za-z0-9&.\-]{1,20}", candidate):
+        ticker = clean_ticker_symbol(candidate)
+        notes.append(f"'{stock_name}' is not in the NSE equity list; trying '{ticker}' directly on Yahoo.")
+        return ticker, lookup_sector(ticker)["sector"]
+    notes.append(f"'{stock_name}' was not found in the NSE equity list and was left unresolved.")
+    return "", "Unknown"
+
 
 def parse_csv_file(file):
     try:
@@ -995,132 +516,39 @@ def parse_csv_file(file):
     except Exception as e:
         return empty_portfolio_df(), f"Error: {e}"
 
-# Analyze portfolio
+# Analyze portfolio (Streamlit wrapper; the calculation lives in tools/portfolio.py)
 def analyze_portfolio(portfolio_df):
     """Fetch fundamental metrics for all stocks with benchmark comparisons"""
     if portfolio_df.empty:
         return None
-    
-    # Fetch NIFTY 50 benchmark once
+
     st.info("Fetching NIFTY 50 benchmark data...")
-    nifty_returns = fetch_index_returns("NIFTY 50")
-    
-    results = []
     progress = st.progress(0)
     status = st.empty()
-    
-    successful = 0
-    failed_stocks = []
-    
-    # First pass: get all metrics
-    for idx, row in portfolio_df.iterrows():
-        status.text(f"Fetching metrics for {row['stock_name']} ({row['ticker']})... ({idx+1}/{len(portfolio_df)})")
-        progress.progress((idx+1)/len(portfolio_df))
-        
-        metrics = fetch_stock_metrics_yf(row['ticker']) if YFINANCE_AVAILABLE else None
-        
-        if metrics:
-            successful += 1
-            result = {
-                "stock_name": row['stock_name'],
-                "ticker": row['ticker'],
-                "sector": row['sector'],
-                "quantity": row['quantity'],
-                "avg_buy_price": row['avg_buy_price']
-            }
-            result.update(metrics)
-            
-            # Fetch sector benchmark
-            sector_index = SECTOR_TO_INDEX.get(row['sector'], "NIFTY 50")
-            sector_returns = fetch_index_returns(sector_index)
-            
-            # Add benchmark data
-            if nifty_returns:
-                result['nifty_1w'] = nifty_returns.get('1w')
-                result['nifty_1m'] = nifty_returns.get('1m')
-                result['nifty_3m'] = nifty_returns.get('3m')
-            
-            if sector_returns:
-                result['sector_1w'] = sector_returns.get('1w')
-                result['sector_1m'] = sector_returns.get('1m')
-                result['sector_3m'] = sector_returns.get('3m')
-                result['sector_index_name'] = sector_index
-            
-            # Calculate relative performance
-            stock_1w = result.get('1w_change_pct')
-            stock_1m = result.get('1m_change_pct')
-            stock_3m = result.get('3m_change_pct')
-            
-            if stock_1m and result.get('sector_1m'):
-                result['vs_sector_1m'] = round(stock_1m - result['sector_1m'], 2)
-            
-            if stock_1m and result.get('nifty_1m'):
-                result['vs_nifty_1m'] = round(stock_1m - result['nifty_1m'], 2)
-            
-            # Relative performance verdict
-            if result.get('vs_sector_1m') is not None:
-                if result['vs_sector_1m'] > 2:
-                    result['sector_verdict'] = "Outperforming"
-                elif result['vs_sector_1m'] < -2:
-                    result['sector_verdict'] = "Underperforming"
-                else:
-                    result['sector_verdict'] = "In-line"
-            
-            if result.get('vs_nifty_1m') is not None:
-                if result['vs_nifty_1m'] > 2:
-                    result['market_verdict'] = "Outperforming"
-                elif result['vs_nifty_1m'] < -2:
-                    result['market_verdict'] = "Underperforming"
-                else:
-                    result['market_verdict'] = "In-line"
-            
-            # Calculate unrealized P&L
-            if metrics['current_price'] and row['avg_buy_price']:
-                result['total_investment'] = row['avg_buy_price'] * row['quantity']
-                result['current_value'] = metrics['current_price'] * row['quantity']
-                result['unrealized_pl'] = result['current_value'] - result['total_investment']
-                result['unrealized_pl_pct'] = (result['unrealized_pl'] / result['total_investment']) * 100
-            
-            results.append(result)
-            st.session_state.stock_metrics[row['ticker']] = metrics
-        else:
-            failed_stocks.append(row['stock_name'])
-        
-        time.sleep(0.5)
-    
+
+    def on_progress(idx, total, row):
+        status.text(f"Fetching metrics for {row['stock_name']} ({row['ticker']})... ({idx+1}/{total})")
+        progress.progress((idx + 1) / total)
+
+    result = compute_portfolio_metrics(portfolio_df, on_progress=on_progress)
+
     progress.empty()
     status.empty()
-    
-    if failed_stocks:
-        st.warning(f"Could not fetch data for: {', '.join(failed_stocks)}")
+
+    st.session_state.stock_metrics.update(result.stock_metrics)
+
+    if result.failed_stocks:
+        st.warning(f"Could not fetch data for: {', '.join(result.failed_stocks)}")
         st.info("You can add metrics manually below")
-    
-    if successful:
-        st.success(f"Successfully fetched data for {successful} stocks with benchmark comparisons")
-    
-    if not results:
+
+    if result.successful:
+        st.success(f"Successfully fetched data for {result.successful} stocks with benchmark comparisons")
+
+    if result.df is None:
         st.error("No data available. Please add metrics manually.")
         return None
-    
-    result_df = pd.DataFrame(results)
-    
-    # Calculate portfolio-level context for each stock
-    total_portfolio_value = result_df['current_value'].sum() if 'current_value' in result_df.columns else 0
-    
-    for idx in result_df.index:
-        stock_value = result_df.loc[idx, 'current_value'] if 'current_value' in result_df.columns else 0
-        sector = result_df.loc[idx, 'sector']
-        
-        # Stock weight
-        if total_portfolio_value > 0:
-            result_df.loc[idx, 'portfolio_weight_pct'] = (stock_value / total_portfolio_value) * 100
-        
-        # Sector weight
-        sector_total = result_df[result_df['sector'] == sector]['current_value'].sum() if 'current_value' in result_df.columns else 0
-        if total_portfolio_value > 0:
-            result_df.loc[idx, 'sector_weight_pct'] = (sector_total / total_portfolio_value) * 100
-    
-    return result_df
+
+    return result.df
 
 # ========================================
 # UI CODE STARTS HERE
@@ -1263,6 +691,9 @@ with tab_portfolio:
             else:
                 st.rerun()
     
+    for note in st.session_state.pop("resolution_notes", []):
+        st.warning(note)
+
     st.markdown("---")
     st.subheader("📋 Portfolio Preview")
     
@@ -1494,6 +925,7 @@ Respond:"""
                             'nifty_1w': row.get('nifty_1w'),
                             'nifty_1m': row.get('nifty_1m'),
                             'nifty_3m': row.get('nifty_3m'),
+                            'sector_benchmark': row.get('sector_index_name'),
                             'vs_sector_1m': row.get('vs_sector_1m'),
                             'vs_nifty_1m': row.get('vs_nifty_1m')
                         }
@@ -1598,10 +1030,10 @@ Respond:"""
                             if st.button("🔄 Refresh News", key=f"refresh_news_{row['ticker']}"):
                                 st.rerun()
                         
-                        with st.spinner("Searching for latest news from credible sources..."):
+                        with st.spinner("Fetching latest Moneycontrol headlines..."):
                             news_analysis = fetch_stock_news(row['stock_name'], row['ticker'], row['sector'])
                             st.markdown(news_analysis)
-                            st.caption("*AI-searched sources: Moneycontrol, Economic Times, Business Standard, Reuters, Livemint. For real-time updates, visit these sites directly.*")
+                            st.caption("*Headlines from Moneycontrol (via Google News), last 7 days; titles only. The summary is written by AI from those headlines alone.*")
                         
                         # Add direct links to news sources
                         st.markdown("**Quick Links for Latest News:**")
@@ -1614,7 +1046,7 @@ Respond:"""
                         st.markdown("---")
                         
                         # Continue to Part 4 for remaining stock details UI...
-                        # PART 4 - Remaining Stock Details UI (Final Part)
+                           # PART 4 - Remaining Stock Details UI (Final Part)
 # This continues from Part 3 inside the stock expander loop
 
                         # Momentum & Trend Section
