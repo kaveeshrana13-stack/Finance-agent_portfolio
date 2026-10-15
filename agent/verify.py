@@ -69,6 +69,9 @@ def extract_numbers(text):
             continue                                                    # "1. " list marker
         if re.search(r"\btop\s+$", before, re.I):
             continue                                                    # top 5
+        if not has_unit and re.search(r"(?:nifty|sensex|bse|nse|midcap|smallcap|next|s&p|nasdaq|dow|bank\s*nifty)\s*$",
+                                      before, re.I):
+            continue                                                    # index names: NIFTY 50, BSE 500, Nifty Next 50
         if not has_unit and decimals == 0 and _COUNT_AFTER.match(after):
             continue                                                    # "2 stocks", "3 headlines"
         if re.search(r"[A-Za-z]$", text[max(0, start - 1):start]) and not m.group("cur"):

@@ -92,6 +92,8 @@ def get_stock_snapshot(ticker: str) -> dict:
     trend_label, pe_ratio, pb_ratio, dividend_yield, market_cap_cr, roce_pct, roce_trend, roe, debt_to_equity,
     revenue_growth_pct, net_margin_pct, fcf_cr, beta, volatility_pct, max_drawdown_1y_pct}, caveats.
     Units: *_pct are percent, *_cr are INR crore, debt_to_equity is a plain ratio.
+    For banks and financial companies ROCE, trend, D/E and FCF read 'not applicable (bank/financial company)':
+    report that, it is not missing data.
     The result's 'matched' field names the company the input was resolved to: state that company in your
     answer, and mention it if confidence is not 'high'.
     Args:
@@ -108,8 +110,14 @@ def get_stock_snapshot(ticker: str) -> dict:
             "trend_label", "pe_ratio", "pb_ratio",
             "dividend_yield", "market_cap_cr", "roce_pct", "roce_trend", "roe", "debt_to_equity",
             "revenue_growth_pct", "net_margin_pct", "fcf_cr", "beta", "volatility_pct", "max_drawdown_1y_pct")
-    return _dump_matched({"ok": True, "symbol": ticker, "snapshot": {k: m.get(k) for k in keys},
-                          "fundamentals_fy": m.get("fundamentals_fy"), "caveats": m.get("data_warnings", "")}, ticker)
+    snapshot = {k: m.get(k) for k in keys}
+    caveats = m.get("data_warnings", "")
+    if "Bank/NBFC/insurer" in caveats:
+        # say WHY these are empty: a bare None was reported to the user as "ROCE trend is 'None'"
+        for k in ("roce_pct", "roce_trend", "debt_to_equity", "fcf_cr"):
+            snapshot[k] = "not applicable (bank/financial company)"
+    return _dump_matched({"ok": True, "symbol": ticker, "snapshot": snapshot,
+                          "fundamentals_fy": m.get("fundamentals_fy"), "caveats": caveats}, ticker)
 
 
 @tool

@@ -149,6 +149,9 @@ class AdversarialTable(unittest.TestCase):
         (True, "Titan's price has decreased by 9.22% over the last month."),                 # a % after "price"
         (True, "The price moved down 9.22% in a month."),
         (False, "Titan's price has risen 9.22% over the last month."),                       # it fell
+        (True, "NIFTY 50 index returns are: 1 week: 3.44%, 1 month: -0.52%, 3 months: -4.47%."),   # was a false alarm
+        (True, "Nifty Next 50 and BSE 500 are broader, but NIFTY 50 fell 4.47% in three months."),
+        (False, "NIFTY 50 closed at 31000.0."),                                              # a figure after the name
         (True, "TCS's 52-week high is 3350.0, and the price is -29.85% below it."),         # was a false alarm
         (True, "52-week high: 3350.0, price from 52-week high: -29.85%"),
         (False, "TCS's 52-week high is ₹3,500."),                                            # never fetched

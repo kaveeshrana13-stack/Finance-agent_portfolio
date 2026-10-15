@@ -1,10 +1,11 @@
-"""Run the finance agent on a local Ollama model.
+"""Run the finance agent. Gemini by default; a local Ollama model is available with --provider ollama.
 
     python -m agent.run "What is the current market regime?"
-    python -m agent.run --model qwen2.5-coder:7b --steps 8 "Is Titan's ROCE improving?"
+    python -m agent.run --provider ollama --model qwen2.5-coder:7b "Is Titan's ROCE improving?"
 """
 import argparse
 import json
+import os
 import re
 import signal
 import sys
@@ -39,11 +40,42 @@ GUIDELINES = """You are a research assistant for Indian equities. Rules:
 - Give a short, direct answer. This is research support, not investment advice."""
 
 
-def build_agent(model_id="qwen2.5-coder:7b", base_url="http://127.0.0.1:11434", max_steps=8, num_ctx=8192,
-                verbosity=1, temperature=0.1):
-    """Low temperature: a tool-using agent should be consistent, not creative."""
-    model = LiteLLMModel(model_id=f"ollama_chat/{model_id}", api_base=base_url, num_ctx=num_ctx,
-                         temperature=temperature)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PROVIDER = "gemini"
+DEFAULT_MODELS = {"gemini": "gemini-2.5-flash", "ollama": "qwen2.5-coder:7b"}
+
+
+def _load_gemini_key():
+    """Make the project's GOOGLE_API_KEY available to LiteLLM as GEMINI_API_KEY. Never prints it."""
+    if os.getenv("GEMINI_API_KEY"):
+        return
+    key = os.getenv("GOOGLE_API_KEY")
+    if not key:
+        try:
+            from dotenv import dotenv_values
+            key = dotenv_values(PROJECT_ROOT / ".env").get("GOOGLE_API_KEY")
+        except ImportError:
+            key = None
+    if not key:
+        raise RuntimeError("GOOGLE_API_KEY not found in the environment or in the project's .env file")
+    os.environ["GEMINI_API_KEY"] = key
+
+
+def build_model(provider=DEFAULT_PROVIDER, model_id=None, temperature=0.1, num_ctx=8192,
+                base_url="http://127.0.0.1:11434"):
+    """The language model behind the agent. Low temperature: a tool-using agent should be consistent."""
+    model_id = model_id or DEFAULT_MODELS[provider]
+    if provider == "gemini":
+        _load_gemini_key()
+        return LiteLLMModel(model_id=f"gemini/{model_id}", temperature=temperature, num_retries=3)
+    if provider == "ollama":
+        return LiteLLMModel(model_id=f"ollama_chat/{model_id}", api_base=base_url, num_ctx=num_ctx,
+                            temperature=temperature)
+    raise ValueError(f"unknown provider {provider!r}")
+
+
+def build_agent(provider=DEFAULT_PROVIDER, model_id=None, max_steps=8, verbosity=1, temperature=0.1, **model_kw):
+    model = build_model(provider, model_id, temperature=temperature, **model_kw)
     return CodeAgent(tools=AGENT_TOOLS, model=model, max_steps=max_steps, verbosity_level=verbosity,
                      additional_authorized_imports=["json", "math"])
 
@@ -131,12 +163,13 @@ def ask_verified(agent, question, retry=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
-    ap.add_argument("--model", default="qwen2.5-coder:7b")
+    ap.add_argument("--provider", choices=list(DEFAULT_MODELS), default=DEFAULT_PROVIDER)
+    ap.add_argument("--model", default=None, help="default depends on the provider")
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--verbosity", type=int, default=1)
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
     a = ap.parse_args()
-    result = ask_verified(build_agent(a.model, max_steps=a.steps, verbosity=a.verbosity), a.question)
+    result = ask_verified(build_agent(a.provider, a.model, max_steps=a.steps, verbosity=a.verbosity), a.question)
     if a.json:
         print(json.dumps({k: v for k, v in result.items() if k not in ("code", "ledger")}, indent=1,
                          ensure_ascii=False, default=str))
