@@ -118,7 +118,7 @@ def collect_facts(ledger):
                 numeric.append({"value": float(val), "key": leaf, "path": path, "source": src})
             elif isinstance(val, str):
                 strings.append({"value": val, "key": leaf, "source": src})
-                if leaf in ("title", "message", "note", "meaning", "text"):            # figures quoted in headlines etc.
+                if leaf in ("title", "message", "note", "meaning", "text", "detail"):            # figures quoted in headlines etc.
                     for n in extract_numbers(val):
                         numeric.append({"value": n["value"], "key": "headline_text", "path": path, "source": src})
     return numeric, strings
@@ -142,6 +142,7 @@ _LABELS = [
     (r"free cash|fcf\b", ("fcf",)),
     (r"margin", ("margin",)),
     (r"revenue|sales|growth|cagr", ("growth", "cagr", "revenue")),
+    (r"200[- ]?day|200[- ]?dma|moving average", ("200dma",)),
     (r"total value|portfolio value|current value|invested|total investment|cost", ("total_value", "value", "cost", "investment")),
     (r"overall return|portfolio return|p&l|profit|loss\b", ("return", "pct")),
     (r"allocation|weight|concentrat|largest|top holding|top 5|top five|exposure|of the portfolio|of portfolio",

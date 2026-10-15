@@ -109,7 +109,8 @@ def get_stock_snapshot(ticker: str) -> dict:
     keys = ("current_price", "52w_high", "52w_low", "pct_from_52w_high", "1m_change_pct", "3m_change_pct",
             "trend_label", "pe_ratio", "pb_ratio",
             "dividend_yield", "market_cap_cr", "roce_pct", "roce_trend", "roe", "debt_to_equity",
-            "revenue_growth_pct", "net_margin_pct", "fcf_cr", "beta", "volatility_pct", "max_drawdown_1y_pct")
+            "revenue_growth_pct", "net_margin_pct", "fcf_cr", "beta", "volatility_pct", "max_drawdown_1y_pct",
+            "pct_vs_200dma", "earnings_proximity")
     snapshot = {k: m.get(k) for k in keys}
     caveats = m.get("data_warnings", "")
     if "Bank/NBFC/insurer" in caveats:

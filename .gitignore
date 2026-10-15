@@ -7,3 +7,8 @@ venv/
 
 # generated
 reports/
+
+memory/
+
+knowledge/.index/
+knowledge/**/.index/

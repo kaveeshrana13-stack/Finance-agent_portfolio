@@ -198,6 +198,15 @@ def volatility_bucket(vol):
     return "Low" if vol < 20 else "Medium" if vol < 40 else "High"
 
 
+def moving_average_gap_pct(closes, window=200):
+    """Percent the latest close is above (+) or below (-) its `window`-day average; None if too short."""
+    c = [float(x) for x in closes if x == x]
+    if len(c) < window:
+        return None
+    ma = sum(c[-window:]) / window
+    return round((c[-1] / ma - 1) * 100, 2) if ma else None
+
+
 def max_drawdown_pct(closes):
     """Largest peak-to-trough fall (negative percent) over the series."""
     s = pd.Series([float(c) for c in closes])
@@ -519,6 +528,7 @@ def get_risk(ticker):
     data = {
         "volatility_pct": None, "volatility_bucket": None, "beta": None, "beta_obs": 0,
         "beta_benchmark": "NIFTY 50 (^NSEI), 1y daily returns", "max_drawdown_1y_pct": None,
+        "pct_vs_200dma": None,
         "earnings_proximity": _earnings_proximity(info), "exchange": exchange,
     }
 
@@ -531,6 +541,7 @@ def get_risk(ticker):
     data["volatility_pct"] = volatility_pct(closes.tolist())
     data["volatility_bucket"] = volatility_bucket(data["volatility_pct"])
     data["max_drawdown_1y_pct"] = max_drawdown_pct(closes.tolist())
+    data["pct_vs_200dma"] = moving_average_gap_pct(closes.tolist(), 200)
 
     index = _get_history("^NSEI", "1y")
     if index is None:
