@@ -26,6 +26,7 @@ from tools.portfolio import (
     empty_portfolio_df,
     smart_detect_csv_columns,
     compute_portfolio_metrics,
+    summarize_portfolio,
 )
 
 # Global setup
@@ -282,37 +283,31 @@ def analyze_portfolio_with_ai(portfolio_df, user_profile, monthly_budget=None):
     """Comprehensive ACTIONABLE portfolio analysis with clear decisions"""
     analyzer = genai.GenerativeModel("gemini-2.5-flash")
     
-    # Calculate portfolio metrics
-    total_value = portfolio_df['current_value'].sum() if 'current_value' in portfolio_df.columns else 0
-    total_investment = portfolio_df['total_investment'].sum() if 'total_investment' in portfolio_df.columns else 0
-    total_pl_pct = ((total_value - total_investment) / total_investment * 100) if total_investment > 0 else 0
-    
-    # Sector concentration
-    sector_allocation = portfolio_df.groupby('sector')['current_value'].sum() / total_value * 100 if total_value > 0 else pd.Series()
-    sector_summary = "\n".join([f"- {sector}: {pct:.1f}%" for sector, pct in sector_allocation.items()])
-    
-    # Top holdings
-    portfolio_df_sorted = portfolio_df.sort_values('current_value', ascending=False)
-    top_5 = portfolio_df_sorted.head(5)
-    top_holdings_summary = "\n".join([
-        f"- {row['stock_name']}: ₹{row['current_value']:,.0f} ({row['current_value']/total_value*100:.1f}%)"
-        for _, row in top_5.iterrows()
-    ]) if total_value > 0 else "N/A"
-    
-    # Risk metrics
-    avg_beta = portfolio_df['beta'].mean() if 'beta' in portfolio_df.columns else None
-    avg_beta_str = f"{avg_beta:.2f}" if avg_beta and not pd.isna(avg_beta) else "N/A"
-    
-    high_volatility_count = len(portfolio_df[portfolio_df['volatility_bucket'] == 'High']) if 'volatility_bucket' in portfolio_df.columns else 0
-    
-    # Momentum analysis
-    uptrend_count = len(portfolio_df[portfolio_df['trend_label'].str.contains('Uptrend', na=False)]) if 'trend_label' in portfolio_df.columns else 0
-    downtrend_count = len(portfolio_df[portfolio_df['trend_label'].str.contains('Downtrend', na=False)]) if 'trend_label' in portfolio_df.columns else 0
-    
-    # Concentration risks
-    max_stock_weight = portfolio_df['portfolio_weight_pct'].max() if 'portfolio_weight_pct' in portfolio_df.columns else 0
-    max_sector_weight = sector_allocation.max() if not sector_allocation.empty else 0
-    
+    # Portfolio-level numbers come from tools.portfolio.summarize_portfolio (deterministic, tested)
+    summary = summarize_portfolio(portfolio_df)
+    total_value = summary["total_value"]
+    total_investment = summary["cost_of_priced_holdings"]
+    total_pl_pct = summary["overall_return_pct"] or 0
+
+    sector_summary = "\n".join(f"- {sector}: {pct:.1f}%" for sector, pct in summary["sector_allocation"].items())
+    top_holdings_summary = "\n".join(
+        f"- {h['name']}: ₹{h['value']:,.0f} ({h['weight_pct']:.1f}%)" for h in summary["top_holdings"]
+    ) or "N/A"
+
+    beta = summary["beta_value_weighted"]
+    avg_beta_str = f"{beta:.2f}" if beta is not None else "N/A"
+    high_volatility_count = summary["volatility"]["high_count"]
+    uptrend_count = summary["momentum"]["uptrend"]
+    downtrend_count = summary["momentum"]["downtrend"]
+    max_stock_weight = summary["concentration"]["top_holding_pct"]
+    max_sector_weight = summary["concentration"]["largest_sector_pct"]
+
+    data_quality_block = ""
+    if summary["data_quality"]:
+        data_quality_block = "\nDATA QUALITY NOTES (do not draw conclusions from the missing data):\n" + "\n".join(
+            f"- {note}" for note in summary["data_quality"]
+        )
+
     # ISSUE 4 FIX: Add monthly budget context
     budget_context = ""
     if monthly_budget:
@@ -332,11 +327,11 @@ USER PROFILE: {user_profile}{budget_context}
 
 PORTFOLIO DATA:
 - Total Value: Rs {total_value:,.0f}
-- Total Investment: Rs {total_investment:,.0f}
-- Overall Return: {total_pl_pct:+.2f} percent
+- Total Investment (holdings with a known buy price): Rs {total_investment:,.0f}
+- Overall Return (same holdings): {total_pl_pct:+.2f} percent
 - Number of Stocks: {len(portfolio_df)}
 - Largest Stock: {max_stock_weight:.1f} percent
-- Largest Sector: {max_sector_weight:.1f} percent
+- Largest Sector: {max_sector_weight:.1f} percent{data_quality_block}
 
 SECTOR ALLOCATION:
 {sector_summary}
@@ -345,7 +340,7 @@ TOP 5 HOLDINGS:
 {top_holdings_summary}
 
 PORTFOLIO CHARACTERISTICS:
-- Avg Beta: {avg_beta_str}
+- Beta (value-weighted): {avg_beta_str}
 - High Volatility Stocks: {high_volatility_count} out of {len(portfolio_df)}
 - Uptrend: {uptrend_count} | Downtrend: {downtrend_count}
 
@@ -429,7 +424,7 @@ OUTPUT STYLE RULES:
 CRITICAL RULES:
 - Concentration over 40 percent in one sector = urgent action needed
 - Concentration over 20 percent in one stock = acceptable ONLY if:
-  * Sector is Leading in current regime
+  * Sector is outperforming the market in the current regime
   * Fundamentals + momentum aligned
   * Policy tailwinds present
 - Never recommend diversify for diversification sake
