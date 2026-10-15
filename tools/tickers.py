@@ -7,5 +7,5 @@ def clean_ticker_symbol(symbol):
         return None
     symbol = str(symbol).strip().upper()
     symbol = symbol.replace('.NS', '').replace('.BO', '')
-    symbol = re.sub(r'[^A-Z0-9&]', '', symbol)
+    symbol = re.sub(r'[^A-Z0-9&\-]', '', symbol)
     return symbol if symbol else None

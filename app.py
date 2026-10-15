@@ -12,6 +12,8 @@ import google.generativeai as genai
 # Plain-Python data tools (no Streamlit / LLM) live in tools/
 from tools._yf import YFINANCE_AVAILABLE
 from tools.tickers import clean_ticker_symbol
+from tools.resolver import resolve_stock
+from tools.sector_map import lookup_sector
 from tools.market import (
     SECTOR_TO_INDEX,
     fetch_index_returns,
@@ -460,19 +462,36 @@ Remember: This is a WEEKLY COMMAND CENTER report. Be concise, conditional, and a
 # Portfolio helpers
 
 def get_stock_info(stock_name):
-    """Get ticker and sector using AI"""
-    enricher = genai.GenerativeModel("gemini-2.5-flash")
-    prompt = f'Identify NSE ticker and sector for "{stock_name}". Return JSON: {{"ticker": "TCS", "sector": "IT"}}. No markdown.'
-    
-    try:
-        resp = enricher.generate_content(prompt)
-        text = resp.text.strip().strip("`").replace("json", "").strip()
-        data = json.loads(text)
-        ticker = clean_ticker_symbol(data.get("ticker", stock_name.upper()))
-        sector = data.get("sector", "Unknown")
-        return ticker, sector
-    except Exception:
-        return clean_ticker_symbol(stock_name.upper()), "Unknown"
+    """Resolve a company name/symbol to (NSE ticker, sector).
+
+    Deterministic: the official NSE list decides the symbol and Yahoo's industry decides
+    the sector. Anything uncertain is recorded in session_state["resolution_notes"] for
+    the Portfolio Preview instead of being guessed.
+    """
+    notes = st.session_state.setdefault("resolution_notes", [])
+    res = resolve_stock(stock_name)
+
+    if res["status"] == "resolved":
+        ticker = res["symbol"]
+        if res["confidence"] != "high" or res["note"]:
+            notes.append(f"'{stock_name}' → {ticker} ({res['name']}). {res['note']}".strip())
+        return ticker, lookup_sector(ticker)["sector"]
+
+    if res["status"] == "ambiguous":
+        options = "; ".join(f"{c['symbol']} ({c['name']})" for c in res["candidates"])
+        notes.append(f"'{stock_name}' matches several companies, so it was left unresolved. "
+                     f"Re-enter it with the exact symbol. Options: {options}")
+        return "", "Unknown"
+
+    # Not in the NSE list. If it looks like a bare symbol (e.g. a BSE-only listing), let
+    # Yahoo try it directly; otherwise leave it unresolved rather than guess from a name.
+    candidate = str(stock_name).strip()
+    if re.fullmatch(r"[A-Za-z0-9&.\-]{1,20}", candidate):
+        ticker = clean_ticker_symbol(candidate)
+        notes.append(f"'{stock_name}' is not in the NSE equity list; trying '{ticker}' directly on Yahoo.")
+        return ticker, lookup_sector(ticker)["sector"]
+    notes.append(f"'{stock_name}' was not found in the NSE equity list and was left unresolved.")
+    return "", "Unknown"
 
 
 def parse_csv_file(file):
@@ -689,6 +708,9 @@ with tab_portfolio:
             else:
                 st.rerun()
     
+    for note in st.session_state.pop("resolution_notes", []):
+        st.warning(note)
+
     st.markdown("---")
     st.subheader("📋 Portfolio Preview")
     
