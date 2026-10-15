@@ -200,6 +200,12 @@ class PromptsAndStyle(unittest.TestCase):
         tcs = next(n for n in out["notes"] if n["symbol"] == "TCS")
         self.assertFalse(tcs["verified"])
 
+    def test_prompts_demand_a_change_from_the_current_state_and_a_specific_watch_item(self):
+        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
+        run(llm)
+        self.assertIn("CHANGE from the current state", llm.prompts[0])
+        self.assertIn("never \"the decisions\"", llm.prompts[1])
+
     def test_summary_facts_are_plain_text(self):
         llm = ScriptedLLM([notes_json(), SUMMARY_OK])
         run(llm)

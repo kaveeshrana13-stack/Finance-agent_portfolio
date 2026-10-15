@@ -174,8 +174,11 @@ Rules:
 - action is one of HOLD, ADD, REDUCE, EXIT, REVIEW (REVIEW when the facts are too thin to decide).
 - rationale: 1 or 2 plain-English sentences, at most 40 words. Copy figures exactly as shown in FACTS.
   Say how the stock compares with its sector benchmark when that is given.
-- trigger: ONE full sentence beginning "Reconsider if" that names a trend or event that would change the decision
-  (for example "Reconsider if the ROCE trend turns declining."). Do NOT invent numeric thresholds.
+- trigger: ONE full sentence beginning "Reconsider if" naming a CHANGE from the current state in FACTS that would
+  change the decision. If FACTS say the ROCE trend is stable, "turns stable" is not a change; say what it would have
+  to turn into. Do NOT invent numeric thresholds.
+- Use the stock's own weakest and strongest fact in the rationale (for example a big gap to its sector), not
+  generic praise.
 - Write every metric by its plain name exactly as labelled in FACTS ("P/E ratio", "1-month price change"). Never use underscores or code-style names.
 - If a metric is missing or says "not applicable", say that plainly; do not guess it.
 - Cite a document as [D1] only if you used it."""
@@ -204,7 +207,8 @@ Data notes: {'; '.join(p['data_quality']) or 'none'}"""
 {facts}
 {fix}
 Write a portfolio summary in plain English, at most 90 words: overall position, the main concentration risk, and
-the one thing to watch next week. Copy figures exactly as shown in FACTS. No bullet points, no headings, no field names."""
+ONE specific thing to watch next week: name a holding, a sector or a risk (never "the decisions" or "performance").
+Copy figures exactly as shown in FACTS. No bullet points, no headings, no field names."""
 
 
 # --------------------------------------------------------------------------- the graph

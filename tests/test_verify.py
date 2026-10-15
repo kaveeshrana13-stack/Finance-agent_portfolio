@@ -21,6 +21,7 @@ LEDGER = [
     {"tool": "computed", "args": {}, "result": {"symbol": "TITAN", "vs_sector_1m_pct": -6.37}},
     snap("TCS"),
     snap("INFY", current_price=1450.0, pe_ratio=15.12, roce_pct=41.66, roce_trend="improving", beta=0.9),
+    {"tool": "summarize_portfolio", "args": {}, "result": {"total_value": 60315.0, "overall_return_pct": -22.17}},
     {"tool": "get_market_regime", "args": {}, "result": {
         "ok": True, "regime": "Range-bound", "nifty_returns_pct": {"1w": 3.44, "1m": -0.52, "3m": -4.47}}},
     {"tool": "get_stock_news", "args": {"ticker_or_name": "TCS"}, "result": {
@@ -165,6 +166,7 @@ class AdversarialTable(unittest.TestCase):
         (True, "TCS has a pe_ratio of 16.47 and roce_pct of 54.93."),                        # field-style names
         (True, "Titan is 6.37 percentage points behind its sector."),                        # relative performance
         (False, "TCS has a pe_ratio of 54.93."),                                             # still a mismatch
+        (True, "The overall return on holdings with a known cost of -22.17% is weak."),     # "cost" is not the label
         (False, "TCS's 52-week high is ₹3,500."),                                            # never fetched
         (False, "TCS revenue growth is 2.1%."),                                              # 2.1 ~ dividend 2.08
         (False, "TCS P/E is about 17."),                                                     # 16.47 rounds to 16

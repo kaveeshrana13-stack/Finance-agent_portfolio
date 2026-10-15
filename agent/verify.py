@@ -293,7 +293,9 @@ def verify_answer(answer, ledger):
         allowed = tuple(label or ()) + tuple(unit_keys or ())
         if n["unit"] in ("%", "percent"):
             # a percentage is never a price level or a crore amount: "the price fell 9.22%" is a change
-            allowed = tuple(k for k in allowed if k not in ("current_price", "price", "high", "low", "target", "eps"))
+            allowed = tuple(k for k in allowed if k not in (
+                "current_price", "price", "high", "low", "target", "eps",
+                "total_value", "value", "cost", "investment", "fcf", "market_cap", "_cr"))
             allowed = allowed or ("change_pct", "returns", "1w", "1m", "3m", "nifty", "pct", "growth", "margin",
                                   "roce", "roe", "yield", "volatility", "drawdown", "cagr")
 
