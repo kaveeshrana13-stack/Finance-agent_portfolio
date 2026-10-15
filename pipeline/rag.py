@@ -149,6 +149,19 @@ class DocumentIndex:
     def __len__(self):
         return self.n_chunks
 
+    def sources(self, symbol=None):
+        """File names of the documents that apply to a company (its own folder plus general ones)."""
+        out = set()
+        for n in self._nodes:
+            m = n.metadata or {}
+            if not symbol or m.get("symbol") in ("", None, symbol.upper()):
+                out.add(m.get("source"))
+        return sorted(x for x in out if x)
+
+    def covers(self, symbol):
+        """True when company-specific documents exist (general documents alone do not count)."""
+        return any((n.metadata or {}).get("symbol") == symbol.upper() for n in self._nodes)
+
     def search(self, query, k=3, symbol=None, hybrid=True):
         """Top passages: [{source, page, symbol, text, score, found_by}].
 

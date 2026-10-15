@@ -160,10 +160,20 @@ class GroundedAnswers(unittest.TestCase):
 
 class EvalScoring(unittest.TestCase):
     def test_answerable_needs_every_pattern(self):
-        _, pats, _ = ANSWERABLE[0]                      # contract value + mega deals
+        _, _, pats, _ = ANSWERABLE[0]                   # contract value + mega deals
         self.assertTrue(score_answer("TCV of $40.7B including 5 mega deals", pats))
         self.assertFalse(score_answer("TCV of $40.7B", pats))
         self.assertFalse(score_answer(NOT_FOUND, pats))
+
+    def test_answer_patterns_accept_correct_phrasings_the_passage_patterns_would_reject(self):
+        """Regression: the first scorer marked these correct answers wrong."""
+        by_q = {q: ans for q, _, ans, _ in ANSWERABLE}
+        self.assertTrue(score_answer("TCS's operating margin for FY26 was 25%.", by_q["What was TCS's operating margin for FY26?"]))
+        self.assertTrue(score_answer("A final dividend of ₹31 per share.", by_q["What final dividend did the board recommend?"]))
+        self.assertTrue(score_answer("3 mega deals were booked.", by_q["How many mega deals were booked in the fourth quarter?"]))
+        self.assertTrue(score_answer("Three mega deals were booked.", by_q["How many mega deals were booked in the fourth quarter?"]))
+        self.assertFalse(score_answer("5 mega deals were booked.", by_q["How many mega deals were booked in the fourth quarter?"]))
+        self.assertFalse(score_answer("The margin was 31%.", by_q["What was TCS's operating margin for FY26?"]))
 
     def test_abstention_scoring(self):
         self.assertTrue(score_abstention(NOT_FOUND))
@@ -181,7 +191,7 @@ class EvalScoring(unittest.TestCase):
     def test_question_sets_are_sane(self):
         self.assertEqual(len(ANSWERABLE), 10)
         self.assertEqual(len(UNANSWERABLE), 4)
-        self.assertEqual(len({q for q, _, _ in ANSWERABLE} | set(UNANSWERABLE)), 14)
+        self.assertEqual(len({q for q, _, _, _ in ANSWERABLE} | set(UNANSWERABLE)), 14)
 
 
 if __name__ == "__main__":

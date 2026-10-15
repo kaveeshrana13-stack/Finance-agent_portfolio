@@ -374,12 +374,19 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None, memory=None, invest
         companies = {r["symbol"]: r["company"] for r in state["resolved"]}
         tools = inv.Tools(docs=(lambda q, sym: _search(kb, q, sym)) if kb is not None and len(kb) else None,
                           news=lambda sym: tb.news(sym), fundamentals=tb.fundamentals, risk=tb.risk)
-        picks, _, how = inv.triage(llm, flags, companies, max_stocks=max_stocks)
+        sources = {}
+        if kb is not None and len(kb):
+            for sym in companies:
+                has = getattr(kb, "covers", lambda s: True)(sym)
+                sources[sym] = list(getattr(kb, "sources", lambda s: ["documents"])(sym)) if has else []
+        has_docs = {s for s, v in sources.items() if v}
+        picks, _, how = inv.triage(llm, flags, companies, max_stocks=max_stocks, has_docs=has_docs)
         results, warnings = [], list(state.get("warnings", []))
         for pick in picks:
             sym = pick["symbol"]
             r = inv.investigate_stock(llm, tools, sym, companies.get(sym, sym), state["facts"][sym]["sector"],
-                                      pick["question"], flags[sym], max_tool_calls=max_tool_calls)
+                                      pick["question"], flags[sym], max_tool_calls=max_tool_calls,
+                                      doc_sources=sources.get(sym))
             results.append(r)
             if r["stopped"] == "model_unavailable":
                 warnings.append(f"Research on {sym} stopped early: no model answered.")

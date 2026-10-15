@@ -32,8 +32,12 @@ TOOL_HELP = {
     "get_fundamentals_history": ("{}", "Revenue, margins, ROCE, ROE and free cash flow for the last few fiscal years."),
     "get_risk_profile": ("{}", "Volatility, beta, 1-year drawdown, gap to the 200-day average and earnings timing."),
 }
-_GAP = re.compile(r"^\s*(no |none |nothing |the (?:documents?|evidence|news|transcript|filings?)\b.{0,40}\b(?:do(?:es)? not|did not|"
-                  r"don't|doesn't|no mention)|there is no )", re.I)
+# A statement of ABSENCE ("the evidence does not explain...") is not a positive claim and must not be graded
+# as one: it has no content for a citation to support.
+_GAP = re.compile(r"^\s*(no |none |nothing |there is no |there are no )|"
+                  r"\b(?:do(?:es)? not|did not|don't|doesn't|cannot|can't|not enough|insufficient|no (?:evidence|information|"
+                  r"data|mention|explanation))\b.{0,60}\b(?:contain|explain|provide|show|mention|include|indicate|specify|"
+                  r"state|address|support|evidence|information|data|available|sufficient)\b|\bno evidence\b", re.I)
 
 
 @dataclass
@@ -91,20 +95,28 @@ def default_question(symbol, flags):
     return f"What explains these concerns for {symbol}: {parts}? Is it temporary or structural?"
 
 
-def triage(llm, flags_by_symbol, companies, max_stocks=2):
-    """The model picks which flagged stocks to investigate and what to ask. Returns (picks, requests, how)."""
+def triage(llm, flags_by_symbol, companies, max_stocks=2, has_docs=None):
+    """The model picks which flagged stocks to investigate and what to ask. Returns (picks, requests, how).
+
+    `has_docs` is the set of symbols that have filings or transcripts. The model is told which do, because a
+    live run showed it investigating stocks it could not research (and ignoring the one it could). If it still
+    picks none of them while a flagged stock has documents, one is swapped in and the trace says so.
+    """
+    has_docs = set(has_docs or [])
     candidates = [s for s, f in flags_by_symbol.items() if concern_score(f) > 0]
     if not candidates or max_stocks <= 0:
         return [], 0, "nothing flagged"
     lines = []
     for s in candidates:
         fl = flags_by_symbol[s]
-        lines.append(f"{s} ({companies.get(s, s)}), concern score {concern_score(fl)}:")
+        docs = "filings and transcripts available" if s in has_docs else "no filings available"
+        lines.append(f"{s} ({companies.get(s, s)}), concern score {concern_score(fl)}, {docs}:")
         lines += [f"   - [{f.severity}] {f.title}: {f.detail}" for f in fl if f.kind == "concern"]
     prompt = (f"Rule-based flags for a portfolio review:\n" + "\n".join(lines) +
               f"\n\nChoose at most {max_stocks} stocks that most deserve a closer look by a research analyst, and for each "
               f"write the single most useful question to answer. Prefer stocks where the explanation is not obvious from "
-              f"the flags themselves. Reply with JSON only: "
+              f"the flags themselves, and where research is possible: stocks marked 'no filings available' can only be "
+              f"researched through news and statements. Reply with JSON only: "
               f'{{"investigate": [{{"symbol": "...", "question": "..."}}]}}')
     try:
         text, _ = llm.generate(prompt, system="You are a careful senior analyst deciding where to spend research time.")
@@ -115,6 +127,12 @@ def triage(llm, flags_by_symbol, companies, max_stocks=2):
     if not picks:                                    # unusable or unavailable: fall back to the rule scores
         how = "rule scores (model gave no usable answer)"
         picks = [{"symbol": s, "question": ""} for s in top_concerns(flags_by_symbol, max_stocks)]
+    ranked = top_concerns(flags_by_symbol, len(flags_by_symbol))
+    with_docs = [s for s in ranked if s in has_docs]
+    if with_docs and picks and not any(p["symbol"] in has_docs for p in picks):
+        added = with_docs[0]
+        picks = picks[:max(1, max_stocks) - 1] + [{"symbol": added, "question": ""}]
+        how += f"; {added} added because it is the flagged stock that has documents"
     for p in picks:
         if not p["question"]:
             p["question"] = default_question(p["symbol"], flags_by_symbol[p["symbol"]])
@@ -151,7 +169,8 @@ def _risk_text(result):
     return txt or "No risk profile available."
 
 
-def investigate_stock(llm, tools, symbol, company, sector, question, flags, max_tool_calls=2, ledger_view=None):
+def investigate_stock(llm, tools, symbol, company, sector, question, flags, max_tool_calls=2, ledger_view=None,
+                      doc_sources=None):
     """Run the bounded loop for one stock. Returns a dict describing everything that happened."""
     ledger_view = ledger_view or ledger.snapshot
     evidence, steps, requests = [], [], 0
@@ -173,7 +192,10 @@ def investigate_stock(llm, tools, symbol, company, sector, question, flags, max_
 
     flag_lines = "\n".join(f"- {f.title}: {f.detail}" for f in flags if f.kind == "concern") or "- (no concerns raised)"
     strengths = "\n".join(f"- {f.title}: {f.detail}" for f in flags if f.kind == "strength")
-    tool_lines = "\n".join(f'- {n} {a}: {d}' for n, (a, d) in TOOL_HELP.items())
+    offered = {n: v for n, v in TOOL_HELP.items() if n != "search_documents" or doc_sources}
+    tool_lines = "\n".join(f'- {n} {a}: {d}' for n, (a, d) in offered.items())
+    docs_line = ("DOCUMENTS AVAILABLE FOR THIS COMPANY: " + ", ".join(doc_sources)) if doc_sources else \
+                "No filings or transcripts are available for this company, so do not search documents."
 
     while True:
         left = max_tool_calls - used_calls
@@ -183,6 +205,7 @@ QUESTION: {question}
 WHY IT WAS SELECTED (rule flags):
 {flag_lines}
 {('STRENGTHS NOTED:' + chr(10) + strengths) if strengths else ''}
+{docs_line}
 EVIDENCE SO FAR:
 {render()}
 
@@ -216,7 +239,9 @@ If the evidence does not explain the concern, say so as a finding with an empty 
         used_calls += 1
         name, args, new_ids = act["action"], act["args"], []
         try:
-            if name == "search_documents" and tools.docs:
+            if name == "search_documents" and not doc_sources:
+                new_ids = [add_evidence(name, "No documents are available for this company.")]
+            elif name == "search_documents" and tools.docs:
                 q = str(args.get("query") or question)
                 hits = tools.docs(q, symbol) or []
                 ledger.record("search_documents", {"query": q, "symbol": symbol}, {
@@ -260,10 +285,13 @@ def check_findings(raw, evidence, ledger_entries):
         missing = [c for c in cited if c not in by_id]
         if missing:
             issues.append(f"cites evidence that does not exist: {', '.join(missing)}")
+        is_gap = bool(_GAP.search(claim))
         if not cited:
-            if not _GAP.match(claim):
+            if not is_gap:
                 issues.append("makes a claim without citing any evidence")
             kind = "gap"
+        elif is_gap:
+            kind = "gap"                      # an absence statement, even if it points at the evidence it checked
         else:
             kind = "claim"
             have = set()

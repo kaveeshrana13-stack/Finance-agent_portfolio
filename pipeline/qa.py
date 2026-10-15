@@ -60,7 +60,7 @@ def citation_report(answer, passages):
     return out
 
 
-def answer_question(question, index, llm, symbol=None, k=3):
+def answer_question(question, index, llm, symbol=None, k=5):
     """Returns {answer, abstained, passages, citations, verification, model}. `llm` is a FallbackLLM-like object."""
     passages = index.search(question, k=k, symbol=symbol)
     if not passages:

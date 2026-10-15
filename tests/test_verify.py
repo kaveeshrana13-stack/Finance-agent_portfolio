@@ -163,6 +163,8 @@ class AdversarialTable(unittest.TestCase):
         (True, "TCS's 52-week high is 3350.0, and the price is -29.85% below it."),         # was a false alarm
         (True, "52-week high: 3350.0, price from 52-week high: -29.85%"),
         (True, "The 1m change is 7.94% and the 3M change is -9.22%."),                       # window shorthand
+        (True, "Under Ind AS 116 lease liabilities are included, and Regulation 30 applies."),   # standard names
+        (False, "Under Ind AS 116 the ratio is 3.7."),                                       # a real invented figure
         (True, "TCS has a pe_ratio of 16.47 and roce_pct of 54.93."),                        # field-style names
         (True, "Titan is 6.37 percentage points behind its sector."),                        # relative performance
         (False, "TCS has a pe_ratio of 54.93."),                                             # still a mismatch

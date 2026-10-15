@@ -101,7 +101,8 @@ class Loop(unittest.TestCase):
     def run_loop(self, replies, max_tool_calls=2, **kw):
         llm = Scripted(replies)
         r = investigate_stock(llm, kw.pop("tools", tools()), "TCS", "Tata Consultancy Services", "IT",
-                              "Why is ROCE declining?", FLAGS, max_tool_calls=max_tool_calls)
+                              "Why is ROCE declining?", FLAGS, max_tool_calls=max_tool_calls,
+                              doc_sources=kw.pop("doc_sources", ["call.pdf"]))
         return r, llm
 
     def test_the_model_picks_a_tool_then_finishes_with_cited_findings(self):
@@ -158,6 +159,52 @@ class Loop(unittest.TestCase):
         self.assertIn("beta against NIFTY 50 0.83", r["evidence"][1]["text"])
 
 
+class DocumentAvailability(unittest.TestCase):
+    """Regression: a live run investigated RELIANCE and TITAN (no documents) and ignored TCS (has a transcript)."""
+
+    def setUp(self):
+        ledger.reset()
+
+    def test_without_documents_the_tool_is_not_offered_and_the_prompt_says_so(self):
+        llm = Scripted([act("finish", findings=[])])
+        investigate_stock(llm, tools(), "RELIANCE", "Reliance", "Energy", "why?", FLAGS, doc_sources=[])
+        self.assertIn("No filings or transcripts are available", llm.prompts[0])
+        self.assertNotIn("- search_documents", llm.prompts[0])
+
+    def test_with_documents_the_sources_are_named(self):
+        llm = Scripted([act("finish", findings=[])])
+        investigate_stock(llm, tools(), "TCS", "TCS", "IT", "why?", FLAGS, doc_sources=["call.pdf"])
+        self.assertIn("DOCUMENTS AVAILABLE FOR THIS COMPANY: call.pdf", llm.prompts[0])
+        self.assertIn("- search_documents", llm.prompts[0])
+
+    def test_a_search_request_without_documents_is_answered_honestly(self):
+        llm = Scripted([act("search_documents", args={"query": "x"}), act("finish", findings=[])])
+        r = investigate_stock(llm, tools(), "ITC", "ITC", "FMCG", "why?", FLAGS, doc_sources=[])
+        self.assertIn("No documents are available", r["evidence"][0]["text"])
+
+    def test_triage_is_told_which_stocks_have_documents(self):
+        flags = {"A": evaluate_stock("A", {"roce_pct": 9.0}), "B": evaluate_stock("B", {"roce_pct": 9.0})}
+        llm = Scripted([json.dumps({"investigate": [{"symbol": "A", "question": "q"}]})])
+        triage(llm, flags, {}, max_stocks=1, has_docs={"B"})
+        self.assertIn("B (B), concern score", llm.prompts[0])
+        self.assertIn("filings and transcripts available", llm.prompts[0])
+        self.assertIn("no filings available", llm.prompts[0])
+
+    def test_a_flagged_stock_with_documents_is_swapped_in_when_the_model_ignores_it(self):
+        flags = {"A": evaluate_stock("A", {"roce_pct": 9.0, "pct_vs_200dma": -3.0}),
+                 "TCS": evaluate_stock("TCS", {"roce_pct": 9.0})}
+        llm = Scripted([json.dumps({"investigate": [{"symbol": "A", "question": "q?"}]})])
+        picks, _, how = triage(llm, flags, {}, max_stocks=1, has_docs={"TCS"})
+        self.assertEqual([p["symbol"] for p in picks], ["TCS"])
+        self.assertIn("added because it is the flagged stock that has documents", how)
+
+    def test_no_swap_when_the_model_already_chose_a_stock_with_documents(self):
+        flags = {"A": evaluate_stock("A", {"roce_pct": 9.0}), "TCS": evaluate_stock("TCS", {"roce_pct": 9.0})}
+        llm = Scripted([json.dumps({"investigate": [{"symbol": "TCS", "question": "q?"}]})])
+        picks, _, how = triage(llm, flags, {}, max_stocks=1, has_docs={"TCS"})
+        self.assertEqual((picks[0]["symbol"], how), ("TCS", "model"))
+
+
 class Findings(unittest.TestCase):
     EVIDENCE = [{"id": "E1", "tool": "search_documents", "text": DOC["text"], "source": "call.pdf", "page": 8}]
 
@@ -190,6 +237,17 @@ class Findings(unittest.TestCase):
         gap = self.check("The documents do not explain the decline in ROCE.", [])
         self.assertTrue(gap["verified"])
         self.assertEqual(gap["kind"], "gap")
+
+    def test_an_absence_statement_that_cites_its_evidence_is_not_graded_as_a_claim(self):
+        """Regression: 'the evidence does not contain X [E1]' was flagged with '18% word overlap'."""
+        f = self.check("The provided history shows ROCE fluctuating, but the available evidence does not contain "
+                       "data on whether capital expenditure explains it.", ["E1"])
+        self.assertTrue(f["verified"], f["issues"])
+        self.assertEqual(f["kind"], "gap")
+
+    def test_an_absence_statement_still_has_its_figures_checked(self):
+        f = self.check("The evidence does not explain why margin fell to 31%.", ["E1"])
+        self.assertFalse(f["verified"])
 
     def test_at_most_three_findings(self):
         raw = [{"claim": f"Claim {i} operating margin 25%", "evidence": ["E1"]} for i in range(6)]

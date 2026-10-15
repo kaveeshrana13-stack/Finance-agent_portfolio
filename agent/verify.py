@@ -72,6 +72,9 @@ def extract_numbers(text):
         if not has_unit and re.search(r"(?:nifty|sensex|bse|nse|midcap|smallcap|next|s&p|nasdaq|dow|bank\s*nifty)\s*$",
                                       before, re.I):
             continue                                                    # index names: NIFTY 50, BSE 500, Nifty Next 50
+        if not has_unit and re.search(r"(?:\bind\s*as|\bas|\bifrs|\bifrs\s*s|\bregulation|\bsection|\bschedule|\bclause|"
+                                      r"\barticle|\brule|\bform|\bq|\bgaap)\s*$", before, re.I):
+            continue                                                    # Ind AS 116, IFRS 16, Regulation 30, Section 80
         if not has_unit and decimals == 0 and re.match(r"^[mwyd](?:_|\b)", after, re.I):
             continue                                                    # 1m, 3M, 52w, 1y: window shorthand
         if not has_unit and decimals == 0 and _COUNT_AFTER.match(after):
