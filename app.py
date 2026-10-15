@@ -13,6 +13,7 @@ import google.generativeai as genai
 from tools._yf import YFINANCE_AVAILABLE
 from tools.tickers import clean_ticker_symbol
 from tools.resolver import resolve_stock
+from tools.news import get_stock_news
 from tools.sector_map import lookup_sector
 from tools.market import (
     fetch_index_returns,
@@ -84,52 +85,45 @@ def get_profile_summary():
 SYSTEM_PROMPT = """You are a Personal Finance Agent for India. Help users make better financial decisions safely.
 Current profile: {PROFILE_SUMMARY}"""
 
-# ISSUE 5 FIX: Add news fetching function with web search capability
 def fetch_stock_news(stock_name, ticker, sector):
-    """Fetch recent news about stock, sector, or related government policies using AI with search"""
-    
-    # ISSUE 2 FIX: Use web search to get actual latest news
+    """Recent Moneycontrol headlines for a stock, summarised by Gemini from those headlines only.
+
+    The headlines come from tools.news (real, dated, linked). Gemini is only asked to summarise
+    what it is given, citing headline numbers; with no headlines it is not called at all.
+    """
+    news = get_stock_news(ticker or stock_name, company_name=stock_name)
+    data = news["data"]
+
+    if news["status"] == "error":
+        return (f"News is unavailable right now ({'; '.join(news['warnings'])}). "
+                f"Try Moneycontrol directly for {stock_name}.")
+
+    items = data["items"]
+    if not items:
+        return (f"No Moneycontrol headlines mentioning {stock_name} in the last {data['window_days']} days. "
+                "That means nothing was published, not that nothing happened.")
+
+    numbered = "\n".join(f"{n}. [{it['date']}] {it['title']}" for n, it in enumerate(items, 1))
+    summary = ""
     try:
-        # Use Gemini's built-in search capability or construct a search query
-        from datetime import datetime, timedelta
-        
-        # Calculate date range for recent news
-        today = datetime.now()
-        week_ago = today - timedelta(days=7)
-        
-        search_query = f"{stock_name} {ticker} news India stock market {today.strftime('%B %Y')}"
-        
         analyzer = genai.GenerativeModel("gemini-2.5-flash")
-        
-        prompt = f"""You are a financial news analyst. Search the web for the MOST RECENT news about:
+        prompt = f"""Summarise what these recent headlines about {stock_name} ({ticker}) mean for the stock.
 
-Stock: {stock_name} ({ticker})
-Sector: {sector}
-Current Date: {today.strftime('%B %d, %Y')}
+Headlines (the only information you may use):
+{numbered}
 
-IMPORTANT: Only report news from the last 7 days. Ignore any news older than {week_ago.strftime('%B %d, %Y')}.
-
-Search for:
-1. Company-specific news (earnings reports, announcements, deals, management changes)
-2. Sector policy changes or government regulations
-3. Major industry developments affecting this stock
-
-Provide a summary (max 150 words) with:
-- Date of each news item (must be within last 7 days)
-- 2-3 key headlines with dates
-- Impact assessment (positive/negative/neutral)
-- Credible sources (Moneycontrol, Economic Times, Business Standard, Reuters, Livemint)
-
-If no news found from the last 7 days, state: "No significant news developments in the past week. Stock appears stable with no major announcements."
-
-Format: Use bullet points with dates for each news item.
+Rules:
+- Use ONLY facts stated in the headlines. Do not add numbers, causes or events that are not in them.
+- Cite headline numbers like [1], [3] after each point.
+- For each point say whether it looks positive, negative or neutral for the stock.
+- Maximum 120 words. If the headlines are mostly about the wider market, say so.
 """
-        
-        response = analyzer.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return f"News search unavailable. Please check Moneycontrol.com or Google News for latest updates on {stock_name}. You can search: '{stock_name} news latest'"
+        summary = analyzer.generate_content(prompt).text.strip()
+    except Exception:
+        summary = "_Summary unavailable; the headlines are listed below._"
 
+    links = "\n".join(f"{n}. [{it['title']}]({it['link']}) — {it['date']}" for n, it in enumerate(items, 1))
+    return f"{summary}\n\n**Headlines (last {data['window_days']} days):**\n{links}"
 
 
 # AI Analysis Helper
@@ -1041,10 +1035,10 @@ Respond:"""
                             if st.button("🔄 Refresh News", key=f"refresh_news_{row['ticker']}"):
                                 st.rerun()
                         
-                        with st.spinner("Searching for latest news from credible sources..."):
+                        with st.spinner("Fetching latest Moneycontrol headlines..."):
                             news_analysis = fetch_stock_news(row['stock_name'], row['ticker'], row['sector'])
                             st.markdown(news_analysis)
-                            st.caption("*AI-searched sources: Moneycontrol, Economic Times, Business Standard, Reuters, Livemint. For real-time updates, visit these sites directly.*")
+                            st.caption("*Headlines from Moneycontrol (via Google News), last 7 days; titles only. The summary is written by AI from those headlines alone.*")
                         
                         # Add direct links to news sources
                         st.markdown("**Quick Links for Latest News:**")
