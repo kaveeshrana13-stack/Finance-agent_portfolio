@@ -69,6 +69,12 @@ class Supported(unittest.TestCase):
     def test_sign_agnostic_for_declines(self):
         self.assertEqual(statuses("NIFTY fell 4.47% over three months.")[0]["verdict"], "verified")
 
+    def test_a_labelled_figure_quoted_from_text_is_supported(self):
+        ledger = [{"tool": "search_documents", "args": {}, "result": {
+            "passages": [{"id": "D1", "text": "Management guides margins of 14.5 percent next year"}]}}]
+        r = verify_answer("Margins are guided at 14.5 percent.", ledger)
+        self.assertEqual(r["verdict"], "verified")
+
     def test_number_quoted_from_a_headline_counts(self):
         r, s = statuses("One broker has a target of Rs 2530.")
         self.assertEqual(r["verdict"], "verified")

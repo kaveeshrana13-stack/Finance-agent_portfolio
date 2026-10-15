@@ -116,7 +116,7 @@ def collect_facts(ledger):
                 numeric.append({"value": float(val), "key": leaf, "path": path, "source": src})
             elif isinstance(val, str):
                 strings.append({"value": val, "key": leaf, "source": src})
-                if leaf in ("title", "message", "note", "meaning"):            # figures quoted in headlines etc.
+                if leaf in ("title", "message", "note", "meaning", "text"):            # figures quoted in headlines etc.
                     for n in extract_numbers(val):
                         numeric.append({"value": n["value"], "key": "headline_text", "path": path, "source": src})
     return numeric, strings
@@ -140,11 +140,15 @@ _LABELS = [
     (r"free cash|fcf\b", ("fcf",)),
     (r"margin", ("margin",)),
     (r"revenue|sales|growth|cagr", ("growth", "cagr", "revenue")),
+    (r"total value|portfolio value|current value|invested|total investment|cost", ("total_value", "value", "cost", "investment")),
+    (r"overall return|portfolio return|p&l|profit|loss\b", ("return", "pct")),
+    (r"allocation|weight|concentrat|largest|top holding|top 5|top five|exposure|of the portfolio|of portfolio",
+     ("weight", "allocation", "pct", "largest", "top")),
     (r"52[- ]?w(?:ee)?k\s+high|year[- ]high|all[- ]time high|\bhigh\b", ("52w_high",)),
     (r"52[- ]?w(?:ee)?k\s+low|year[- ]low|all[- ]time low|\blow\b", ("52w_low",)),
     (r"share price|stock price|trad(?:es|ing|ed) at|closed at|quoted at|priced at|price\b|quote", ("current_price", "price")),
     (r"return|change|gain|fell|fall|rose|rise[ns]?\b|up\b|down\b|declin|decreas|increas|mov(?:ed|es?)\b|drop|jump|surg|slid|slump|climb",
-     ("change_pct", "returns", "1w", "1m", "3m", "nifty")),
+     ("change_pct", "returns", "1w", "1m", "3m", "nifty", "return")),
 ]
 _LABEL_RES = [(re.compile(p, re.I), keys) for p, keys in _LABELS]
 
@@ -294,7 +298,8 @@ def verify_answer(answer, ledger):
             hits = [f for f in hits if abs(f["value"] - round(f["value"])) < 1e-9]
 
         if allowed:
-            fitting = [f for f in hits if any(k in f["key"] for k in allowed)]
+            # a figure quoted from a headline or document has no field name to match, so any label fits
+            fitting = [f for f in hits if f["key"] == "headline_text" or any(k in f["key"] for k in allowed)]
             if fitting:
                 wrong_way = next((f for f in fitting if _direction_conflict(answer, n["start"], f)), None)
                 if wrong_way and not any(not _direction_conflict(answer, n["start"], f) for f in fitting):
