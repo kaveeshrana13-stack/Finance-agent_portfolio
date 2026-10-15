@@ -3,6 +3,8 @@
     python -m pipeline.run --holdings sample_holdings.csv
     python -m pipeline.run --holdings "TCS:10:3000,Titan:5:3500,HDFC Bank:20:1500"
     python -m pipeline.run --holdings sample_holdings.csv --no-llm      # data only, makes no model calls
+    python -m pipeline.run --holdings sample_holdings.csv --stocks 2    # research agent investigates up to 2
+    python -m pipeline.run --holdings sample_holdings.csv --date 2026-10-09   # back-date, to demo "what changed"
 
 Holdings are name:quantity:average_price, or a CSV with a name, quantity and price column.
 """
@@ -49,23 +51,31 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="data-only report; no model calls")
     ap.add_argument("--knowledge", default=str(ROOT / "knowledge"), help="folder of .txt/.md/.pdf documents")
     ap.add_argument("--out", default=str(ROOT / "reports"))
+    ap.add_argument("--stocks", type=int, default=2, help="how many flagged stocks the research agent may investigate")
+    ap.add_argument("--calls", type=int, default=2, help="tool calls per investigated stock")
+    ap.add_argument("--date", default=None, help="report date YYYY-MM-DD (default today)")
+    ap.add_argument("--no-memory", action="store_true", help="do not read or write week-over-week memory")
     a = ap.parse_args()
 
     from pipeline.graph import build_graph
-    from pipeline.knowledge import KnowledgeBase
     from pipeline.llm import FallbackLLM
+    from pipeline.memory import Memory
+    from pipeline.rag import DocumentIndex
 
     holdings = parse_holdings(a.holdings)
     if not holdings:
         sys.exit("no holdings found")
-    kb = KnowledgeBase.from_directory(a.knowledge) if Path(a.knowledge).exists() else None
+    kb = DocumentIndex.build(a.knowledge) if Path(a.knowledge).exists() else None
     llm = None if a.no_llm else FallbackLLM()
+    day = date.fromisoformat(a.date) if a.date else date.today()
 
     started = time.time()
-    state = build_graph(llm=llm, kb=kb).invoke({"holdings": holdings})
+    graph = build_graph(llm=llm, kb=kb, memory=None if a.no_memory else Memory(), today=day,
+                        investigate=a.stocks > 0, max_stocks=a.stocks, max_tool_calls=a.calls)
+    state = graph.invoke({"holdings": holdings})
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"report_{date.today().isoformat()}.md"
+    path = out_dir / f"report_{day.isoformat()}.md"
     path.write_text(state["report_md"], encoding="utf-8")
 
     print(state["report_md"].split("## Verification")[-1].strip())

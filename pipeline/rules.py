@@ -74,8 +74,13 @@ def _na(x):
 
 # --------------------------------------------------------------------------- stock-level rules
 
-def evaluate_stock(symbol, snap, weight_pct=None, vs_sector_1m=None, thresholds=None):
-    """Flags for one stock from its snapshot (the dict get_stock_snapshot returns)."""
+def evaluate_stock(symbol, snap, weight_pct=None, vs_sector_1m=None, thresholds=None, n_holdings=None):
+    """Flags for one stock from its snapshot (the dict get_stock_snapshot returns).
+
+    `n_holdings` makes position-size limits fair for small portfolios: limits written for diversified
+    portfolios (10% / 20%) would flag every position in a 5-stock portfolio, so the effective limit is
+    the larger of the absolute figure and a multiple of an equal split.
+    """
     t = {**THRESHOLDS, **(thresholds or {})}
     out = []
 
@@ -134,12 +139,20 @@ def evaluate_stock(symbol, snap, weight_pct=None, vs_sector_1m=None, thresholds=
 
     w = _n(weight_pct)
     if w is not None:
-        if w >= t["stock_weight_high_pct"]:
+        high, watch = t["stock_weight_high_pct"], t["stock_weight_watch_pct"]
+        basis = "above {:.0f}%".format(high)
+        if n_holdings and n_holdings > 0:
+            equal = 100.0 / n_holdings
+            high_rel, watch_rel = 2.0 * equal, 1.5 * equal
+            if max(high_rel, high) > high:
+                basis = f"more than twice an equal split ({equal:.0f}% each across {n_holdings} holdings)"
+            high, watch = max(high, high_rel), max(watch, watch_rel)
+        if w >= high:
             add("STOCK_CONCENTRATION", "concern", "high", "Very large single position",
-                f"This stock is {w}% of the portfolio, above {t['stock_weight_high_pct']:.0f}%.", "adviser")
-        elif w >= t["stock_weight_watch_pct"]:
+                f"This stock is {w}% of the portfolio, {basis}.", "adviser")
+        elif w >= watch:
             add("STOCK_CONCENTRATION", "concern", "watch", "Large single position",
-                f"This stock is {w}% of the portfolio, above {t['stock_weight_watch_pct']:.0f}%.", "adviser")
+                f"This stock is {w}% of the portfolio, well above an equal split of the holdings.", "adviser")
     return out
 
 

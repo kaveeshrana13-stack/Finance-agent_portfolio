@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.rules import (THRESHOLDS, apply_guardrails, concern_score, evaluate_portfolio, evaluate_stock,
                             top_concerns)
-from tools.stocks import moving_average_gap_pct
+from tools.stocks import earnings_label, moving_average_gap_pct
 
 NA = "not applicable (bank/financial company)"
 
@@ -56,6 +56,46 @@ class StockRules(unittest.TestCase):
         self.assertIn("ROCE_LOW", ids(evaluate_stock("X", snap)))
         self.assertNotIn("ROCE_LOW", ids(evaluate_stock("X", snap, thresholds={"roce_min_pct": 10.0})))
         self.assertEqual(THRESHOLDS["roce_min_pct"], 15.0)          # the default was not mutated
+
+
+class SmallPortfolios(unittest.TestCase):
+    """Regression: a 5-stock portfolio flagged every position as 'very large'."""
+
+    def sev(self, weight, n):
+        return {f.severity for f in evaluate_stock("A", {}, weight_pct=weight, n_holdings=n)}
+
+    def test_an_equal_split_is_not_a_concern(self):
+        self.assertEqual(self.sev(20.0, 5), set())            # exactly an equal split of 5
+        self.assertEqual(self.sev(26.0, 5), set())            # below 1.5x of an equal split? 26 < 30
+        self.assertEqual(self.sev(14.4, 5), set())
+
+    def test_well_above_an_equal_split_is_flagged(self):
+        self.assertEqual(self.sev(32.0, 5), {"watch"})
+        self.assertEqual(self.sev(45.0, 5), {"high"})
+
+    def test_large_portfolios_keep_the_absolute_limits(self):
+        self.assertEqual(self.sev(12.0, 25), {"watch"})
+        self.assertEqual(self.sev(25.0, 25), {"high"})
+        self.assertEqual(self.sev(6.0, 25), set())
+
+    def test_without_a_holdings_count_nothing_changes(self):
+        self.assertEqual(self.sev(25.0, None), {"high"})
+
+
+class EarningsLabel(unittest.TestCase):
+    """Regression: results published 6 days ago were labelled "This week" and raised 'results due soon'."""
+
+    def test_future_and_past(self):
+        self.assertEqual(earnings_label(3), "This week")
+        self.assertEqual(earnings_label(0), "This week")
+        self.assertEqual(earnings_label(10), "Within 2 weeks")
+        self.assertEqual(earnings_label(-6), "Recently reported")
+        self.assertEqual(earnings_label(-60), "Not soon")
+        self.assertEqual(earnings_label(90), "Not soon")
+
+    def test_recent_results_do_not_raise_the_flag(self):
+        self.assertEqual(evaluate_stock("TCS", {"earnings_proximity": "Recently reported"}), [])
+        self.assertEqual([f.rule for f in evaluate_stock("TCS", {"earnings_proximity": "This week"})], ["EARNINGS_SOON"])
 
 
 class PortfolioRules(unittest.TestCase):

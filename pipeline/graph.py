@@ -354,8 +354,10 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None, memory=None, invest
 
     def rules(state):
         flags = {}
+        n_holdings = len(state.get("facts", {}))
         for sym, f in state.get("facts", {}).items():
-            fl = rl.evaluate_stock(sym, f["snapshot"], weight_pct=f.get("weight_pct"), vs_sector_1m=f.get("vs_sector_1m"))
+            fl = rl.evaluate_stock(sym, f["snapshot"], weight_pct=f.get("weight_pct"),
+                                   vs_sector_1m=f.get("vs_sector_1m"), n_holdings=n_holdings)
             flags[sym] = [x.as_dict() for x in fl]
             ledger.record("rules", {"symbol": sym}, {"symbol": sym, "flags": flags[sym]})
         pf = [x.as_dict() for x in rl.evaluate_portfolio(state["portfolio"])]

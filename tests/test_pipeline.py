@@ -90,6 +90,9 @@ def notes_json(**overrides):
 
 
 SUMMARY_OK = "Total value is well spread; the largest holding is a small share and the market regime is Range-bound."
+CONCENTRATED = [{"name": "TCS", "quantity": 100, "avg_price": 3000.0},        # ~87% of the book
+                {"name": "Titan", "quantity": 5, "avg_price": 3500.0},
+                {"name": "HDFC Bank", "quantity": 20, "avg_price": 1500.0}]
 HOLDINGS = [{"name": "TCS", "quantity": 10, "avg_price": 3000.0},
             {"name": "Titan", "quantity": 5, "avg_price": 3500.0},
             {"name": "HDFC Bank", "quantity": 20, "avg_price": 1500.0}]
@@ -315,15 +318,15 @@ class ResearchAgent(unittest.TestCase):
 class RulesAndGuardrails(unittest.TestCase):
     def test_flags_are_computed_and_reach_the_prompt(self):
         llm = ScriptedLLM([notes_json(), SUMMARY_OK])
-        out = run(llm)
+        out = run(llm, holdings=CONCENTRATED)
         rules = {f["rule"] for f in out["flags"]["TCS"]}
         self.assertIn("ROCE_DECLINING", rules)
-        self.assertIn("STOCK_CONCENTRATION", rules)                  # TCS is ~39% of this portfolio
+        self.assertIn("STOCK_CONCENTRATION", rules)                  # TCS is ~87% of this portfolio
         self.assertIn("Rule flag (concern", llm.prompts[0])
         self.assertIn("PORTFOLIO FLAG", llm.prompts[0])               # IT is the biggest sector
 
     def test_add_is_blocked_on_an_over_concentrated_position(self):
-        out = run(ScriptedLLM([notes_json(TCS={"action": "ADD"}), SUMMARY_OK]))
+        out = run(ScriptedLLM([notes_json(TCS={"action": "ADD"}), SUMMARY_OK]), holdings=CONCENTRATED)
         tcs = next(n for n in out["notes"] if n["symbol"] == "TCS")
         self.assertEqual(tcs["action"], "HOLD")
         self.assertEqual(tcs["model_action"], "ADD")
@@ -331,13 +334,13 @@ class RulesAndGuardrails(unittest.TestCase):
         self.assertIn("Guardrail", out["report_md"])
 
     def test_guardrails_never_turn_a_cautious_call_into_a_bolder_one(self):
-        out = run(ScriptedLLM([notes_json(TCS={"action": "REDUCE"}), SUMMARY_OK]))
+        out = run(ScriptedLLM([notes_json(TCS={"action": "REDUCE"}), SUMMARY_OK]), holdings=CONCENTRATED)
         self.assertEqual(next(n for n in out["notes"] if n["symbol"] == "TCS")["action"], "REDUCE")
         self.assertEqual(out["guardrails"], [])
 
     def test_a_figure_from_a_flag_detail_is_a_supported_fact(self):
-        text = {"rationale": "TCS is 39.05% of the portfolio, above 20%, so size matters here."}
-        out = run(ScriptedLLM([notes_json(TCS=text), SUMMARY_OK]))
+        text = {"rationale": "TCS is 86.5% of the portfolio, more than twice an equal split, so size matters here."}
+        out = run(ScriptedLLM([notes_json(TCS=text), SUMMARY_OK]), holdings=CONCENTRATED)
         self.assertTrue(next(n for n in out["notes"] if n["symbol"] == "TCS")["verified"])
 
 

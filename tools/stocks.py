@@ -385,21 +385,28 @@ def compute_fundamentals(income, balance, cash, info=None, is_financial=False, m
     return {"summary": summary, "history": history, "not_applicable": not_applicable}, warnings
 
 
+def earnings_label(days):
+    """Label for days until the next results (negative = already reported).
+
+    The original code used abs(days), so results published six days ago read as "This week".
+    """
+    if 0 <= days <= 7:
+        return "This week"
+    if 7 < days <= 14:
+        return "Within 2 weeks"
+    if -30 <= days < 0:
+        return "Recently reported"
+    return "Not soon"
+
+
 def _earnings_proximity(info):
     ts = info.get("earningsTimestamp")
     if not ts:
         return "Unknown"
     try:
-        days = (datetime.fromtimestamp(ts) - datetime.now()).days
+        return earnings_label((datetime.fromtimestamp(ts) - datetime.now()).days)
     except Exception:
         return "Unknown"
-    if abs(days) <= 7:
-        return "This week"
-    if abs(days) <= 14:
-        return "Within 2 weeks"
-    if days < 0 and abs(days) <= 30:
-        return "Recently reported"
-    return "Not soon"
 
 
 # --------------------------------------------------------------------------- the tools
