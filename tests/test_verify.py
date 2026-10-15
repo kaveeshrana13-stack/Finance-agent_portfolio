@@ -9,7 +9,7 @@ from agent.verify import annotate, extract_numbers, summarize_report, verify_ans
 
 
 def snap(symbol, **kw):
-    base = {"current_price": 2357.9, "pe_ratio": 16.47, "roce_pct": 54.93, "roce_trend": "declining",
+    base = {"52w_high": 3350.0, "52w_low": 2300.0, "pct_from_52w_high": -29.85, "current_price": 2357.9, "pe_ratio": 16.47, "roce_pct": 54.93, "roce_trend": "declining",
             "debt_to_equity": 0.11, "beta": 0.83, "dividend_yield": 2.08, "fcf_cr": 47948.0, "1m_change_pct": 7.94}
     base.update(kw)
     return {"tool": "get_stock_snapshot", "args": {"ticker": symbol},
@@ -149,6 +149,8 @@ class AdversarialTable(unittest.TestCase):
         (True, "Titan's price has decreased by 9.22% over the last month."),                 # a % after "price"
         (True, "The price moved down 9.22% in a month."),
         (False, "Titan's price has risen 9.22% over the last month."),                       # it fell
+        (True, "TCS's 52-week high is 3350.0, and the price is -29.85% below it."),         # was a false alarm
+        (True, "52-week high: 3350.0, price from 52-week high: -29.85%"),
         (False, "TCS's 52-week high is ₹3,500."),                                            # never fetched
         (False, "TCS revenue growth is 2.1%."),                                              # 2.1 ~ dividend 2.08
         (False, "TCS P/E is about 17."),                                                     # 16.47 rounds to 16

@@ -137,6 +137,8 @@ _LABELS = [
     (r"free cash|fcf\b", ("fcf",)),
     (r"margin", ("margin",)),
     (r"revenue|sales|growth|cagr", ("growth", "cagr", "revenue")),
+    (r"52[- ]?w(?:ee)?k\s+high|year[- ]high|all[- ]time high|\bhigh\b", ("52w_high",)),
+    (r"52[- ]?w(?:ee)?k\s+low|year[- ]low|all[- ]time low|\blow\b", ("52w_low",)),
     (r"share price|stock price|trad(?:es|ing|ed) at|closed at|quoted at|priced at|price\b|quote", ("current_price", "price")),
     (r"return|change|gain|fell|fall|rose|rise[ns]?\b|up\b|down\b|declin|decreas|increas|mov(?:ed|es?)\b|drop|jump|surg|slid|slump|climb",
      ("change_pct", "returns", "1w", "1m", "3m", "nifty")),
@@ -164,6 +166,8 @@ def _label_for(text, start, end):
         inherited = bool(re.search(r"\d", between))
         return best[1], inherited
     after = text[end:end + 18]
+    cut = re.search(r"[,;)]|\s(?:and|but|while|whereas|which)\s", after)
+    after = after[:cut.start()] if cut else after          # a label in the next clause is not this figure's
     fwd = None
     for rx, keys in _LABEL_RES:
         m = rx.search(after)

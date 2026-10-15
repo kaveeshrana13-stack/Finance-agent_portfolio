@@ -6,6 +6,7 @@
 import argparse
 import json
 import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -57,15 +58,37 @@ def clean_answer(text):
     return re.sub(r"</?code>\s*$", "", text).strip()
 
 
-def ask(agent, question):
-    """Run one question; return the answer plus what the agent actually did."""
+MAX_SECONDS = 300      # one question; a single attempt once ran 936 s
+
+
+class _TimeLimit(Exception):
+    pass
+
+
+def ask(agent, question, max_seconds=MAX_SECONDS):
+    """Run one question; return the answer plus what the agent actually did.
+
+    A wall-clock limit (Unix, main thread) stops a stalled model; the result then has error set.
+    """
     ledger.reset()
     started = time.time()
     error = None
+
+    def _alarm(signum, frame):
+        raise _TimeLimit(f"no answer within {max_seconds}s")
+
+    use_alarm = hasattr(signal, "SIGALRM")
+    if use_alarm:
+        old = signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(max_seconds)
     try:
         answer = agent.run(f"{GUIDELINES}\n\nQuestion: {question}", reset=True)
     except Exception as e:                      # keep the harness alive; report the failure
         answer, error = None, f"{type(e).__name__}: {e}"
+    finally:
+        if use_alarm:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
     steps = list(agent.memory.steps)
     code = [getattr(s, "code_action", None) or "" for s in steps if hasattr(s, "tool_calls") or hasattr(s, "code_action")]
     used = sorted({n for c in code for n in TOOL_NAMES if re.search(rf"\b{n}\s*\(", c)})
