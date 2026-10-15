@@ -1,7 +1,14 @@
-# Environment for the agent (separate from the Streamlit app's requirements.txt)
+# Environment for the agent, the weekly pipeline and the Streamlit demo
+# (separate from the original Streamlit app's requirements.txt)
 smolagents[litellm]>=1.20
 tenacity
 python-dotenv
 yfinance
 pandas
 certifi
+langgraph
+llama-index-core
+llama-index-embeddings-fastembed
+fastembed
+pypdf
+streamlit

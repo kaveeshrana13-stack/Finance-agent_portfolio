@@ -35,6 +35,13 @@ def statuses(answer, ledger=LEDGER):
 
 
 class Extraction(unittest.TestCase):
+    def test_rs_inside_a_word_is_not_a_currency(self):
+        """Regression: "fiscal years 2023" was read as "Rs 2023" and flagged as an unsupported figure."""
+        for text in ("across fiscal years 2023 through 2026", "the quarters 2 and 3", "numbers 5 were shown", "hours 24"):
+            raws = [n["raw"] for n in extract_numbers(text)]
+            self.assertFalse(any(r.lower().startswith("rs") for r in raws), (text, raws))
+        self.assertEqual([n["raw"] for n in extract_numbers("a target of Rs 2530 and Rs. 100")], ["Rs 2530", "Rs. 100"])
+
     def raws(self, text):
         return [n["raw"] for n in extract_numbers(text)]
 

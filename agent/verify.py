@@ -25,7 +25,7 @@ import re
 # --------------------------------------------------------------------------- extraction
 
 _NUM = re.compile(
-    r"(?P<sign>[-−])?(?P<cur>₹|Rs\.?\s*)?"
+    r"(?P<sign>[-−])?(?P<cur>₹|(?<![A-Za-z])Rs\.?\s*)?"
     r"(?P<num>\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
     r"(?P<unit>\s*(?:%|percent\b|lakh\s+crore\b|crore\b|cr\b|x\b))?",
     re.I,
