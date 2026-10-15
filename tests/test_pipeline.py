@@ -179,6 +179,15 @@ class VerificationLoop(unittest.TestCase):
 
 
 class PromptsAndStyle(unittest.TestCase):
+    def test_internal_tags_never_reach_the_report(self):
+        """Regression: a note said "the cause is unknown [no evidence]", echoing an internal marker."""
+        bad = notes_json(TCS={"rationale": "ROCE is 54.93% and its cause is unknown [no evidence]."})
+        out = run(ScriptedLLM([bad, SUMMARY_OK]))
+        tcs = next(n for n in out["notes"] if n["symbol"] == "TCS")
+        self.assertNotIn("no evidence", tcs["rationale"])
+        self.assertTrue(tcs["verified"])
+        self.assertNotIn("[no evidence]", out["report_md"])
+
     def test_facts_are_shown_as_plain_labels_not_field_names(self):
         llm = ScriptedLLM([notes_json(), SUMMARY_OK])
         run(llm)

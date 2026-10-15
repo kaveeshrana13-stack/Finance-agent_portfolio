@@ -120,13 +120,16 @@ def _parse_notes(text):
     return [i for i in items if isinstance(i, dict)]
 
 
+_TAGS = re.compile(r"\s*[\[(]\s*(?:no (?:supporting )?evidence(?: was found)?|none)\s*[\])]", re.I)
+
+
 def _clean_note(item):
     action = str(item.get("action", "")).upper().strip()
     return {
         "symbol": str(item.get("symbol", "")).upper().strip(),
         "action": action if action in ACTIONS else "REVIEW",
-        "rationale": str(item.get("rationale", "")).strip(),
-        "trigger": str(item.get("trigger", "")).strip(),
+        "rationale": _TAGS.sub("", str(item.get("rationale", ""))).strip(),
+        "trigger": _TAGS.sub("", str(item.get("trigger", ""))).strip(),
     }
 
 
@@ -176,7 +179,7 @@ def _facts_text(state):
         for invs in (i for i in state.get("investigations", []) if i["symbol"] == r["symbol"]):
             lines.append(f"  - Research question: {invs['question']}")
             for fd in invs["findings"]:
-                cite = ("[" + ", ".join(fd["evidence"]) + "]") if fd["evidence"] else "[no evidence]"
+                cite = ("[" + ", ".join(fd["evidence"]) + "]") if fd["evidence"] else "(no supporting evidence was found)"
                 lines.append(f"  - Research finding {cite}: {fd['claim']}")
             for e in invs["evidence"]:
                 lines.append(f"  - Evidence [{e['id']}] ({e['tool']}{', ' + e['source'] if e.get('source') else ''}): {e['text'][:350]}")
@@ -210,7 +213,8 @@ Rules:
 - If a metric is missing or says "not applicable", say that plainly; do not guess it.
 - Rule flags are prompts to look closer, not instructions. Say whether the flags and research change your decision.
 - When you use a research finding or evidence, cite it as [E1]. Do not state anything the research does not show.
-- A finding marked "[no evidence]" or saying the documents do not explain something means the cause is unknown: say so."""
+- A finding noted "(no supporting evidence was found)" or saying the documents do not explain something means the
+  cause is unknown: say so in plain words. Do not copy bracketed tags into your sentences, except citations like [E1]."""
 
 
 def _summary_prompt(state, problems=None):

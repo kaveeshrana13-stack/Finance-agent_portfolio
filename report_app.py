@@ -142,8 +142,11 @@ with tab_report:
     else:
         s = run["state"]
         p, c = s.get("portfolio", {}), s.get("portfolio", {}).get("concentration", {})
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Market regime", s.get("regime", {}).get("regime", "n/a"))
+        regime = s.get("regime", {})
+        nifty = regime.get("nifty_returns_pct") or {}
+        st.markdown(f"**Market regime: `{regime.get('regime', 'n/a')}`**  ·  NIFTY 50 "
+                    f"1 week {nifty.get('1w', 'n/a')}% · 1 month {nifty.get('1m', 'n/a')}% · 3 months {nifty.get('3m', 'n/a')}%")
+        m2, m3, m4, m5 = st.columns(4)
         m2.metric("Portfolio value", f"₹{p.get('total_value', 0):,.0f}")
         ret = p.get("overall_return_pct")
         m3.metric("Return (known cost)", "n/a" if ret is None else f"{ret:+.2f}%")
@@ -177,17 +180,19 @@ with tab_report:
 
         st.subheader("Holdings")
         rows = []
+        fmt = lambda v, nd=2, suf="": f"{v:,.{nd}f}{suf}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "n/a"
         for r in s.get("resolved", []):
             f = s.get("facts", {}).get(r["symbol"])
             if f:
                 sn = f["snapshot"]
-                num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
                 financial = isinstance(sn.get("roce_pct"), str)
-                rows.append({"Stock": r["symbol"], "Weight %": num(f.get("weight_pct")), "Price ₹": num(sn.get("current_price")),
-                             "1M %": num(sn.get("1m_change_pct")), "vs sector pp": num(f.get("vs_sector_1m")),
-                             "P/E": num(sn.get("pe_ratio")), "ROCE %": num(sn.get("roce_pct")),
-                             "ROCE trend": "n/a (financial)" if financial else (sn.get("roce_trend") or ""),
-                             "D/E": num(sn.get("debt_to_equity")), "Sector benchmark": f.get("benchmark_name") or ""})
+                rows.append({"Stock": r["symbol"], "Weight": fmt(f.get("weight_pct"), 1, "%"),
+                             "Price": fmt(sn.get("current_price"), 1, ""), "1M": fmt(sn.get("1m_change_pct"), 1, "%"),
+                             "vs sector": fmt(f.get("vs_sector_1m"), 1, " pp"), "P/E": fmt(sn.get("pe_ratio"), 1),
+                             "ROCE": "not applicable" if financial else fmt(sn.get("roce_pct"), 1, "%"),
+                             "ROCE trend": "not applicable" if financial else (sn.get("roce_trend") or "n/a"),
+                             "D/E": "not applicable" if financial else fmt(sn.get("debt_to_equity")),
+                             "Sector benchmark": f.get("benchmark_name") or "none"})
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         for w in s.get("warnings", []):
@@ -239,12 +244,29 @@ with tab_flags:
                 "standard for these thresholds, so each rule shows where its number comes from.")
     if run:
         s = run["state"]
-        rows = [{"Stock": sym, "Kind": f["kind"], "Severity": f["severity"], "Flag": f["title"], "Detail": f["detail"],
-                 "Basis": f["provenance"]} for sym, fl in s.get("flags", {}).items() for f in fl]
-        rows += [{"Stock": f"(portfolio) {f['symbol']}", "Kind": f["kind"], "Severity": f["severity"], "Flag": f["title"],
-                  "Detail": f["detail"], "Basis": f["provenance"]} for f in s.get("portfolio_flags", [])]
+        short = lambda prov: ("Screener preset" if "screener" in prov.lower() else
+                              "Trend convention" if "trend convention" in prov.lower() else
+                              "Adviser rule of thumb" if "adviser" in prov.lower() else
+                              "Market convention" if "market convention" in prov.lower() else
+                              "Original app rule" if "original app" in prov.lower() else "Project heuristic")
+        icon = lambda f: ("⚠ " if f["kind"] == "concern" else "✓ ") + f["severity"]
+        rows = [{"Stock": sym, "Flag": f["title"], "Level": icon(f), "Detail": f["detail"], "Basis": short(f["provenance"])}
+                for sym, fl in s.get("flags", {}).items() for f in fl]
+        rows += [{"Stock": f"portfolio · {f['symbol']}", "Flag": f["title"], "Level": icon(f), "Detail": f["detail"],
+                  "Basis": short(f["provenance"])} for f in s.get("portfolio_flags", [])]
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config={
+                "Stock": st.column_config.TextColumn(width="small"), "Flag": st.column_config.TextColumn(width="medium"),
+                "Level": st.column_config.TextColumn(width="small"), "Detail": st.column_config.TextColumn(width="large"),
+                "Basis": st.column_config.TextColumn(width="medium")})
+            with st.expander("What each 'Basis' means"):
+                st.markdown("\n".join(f"- **{k}**: {v}" for k, v in {
+                    "Screener preset": "a threshold commonly used by stock-screener platforms; not an official standard",
+                    "Trend convention": "price below its 200-day average is widely read as bearish; not a trading system on its own",
+                    "Adviser rule of thumb": "published position limits vary from about 5% to 25% depending on the source",
+                    "Market convention": "a common usage with no authoritative definition",
+                    "Original app rule": "taken from this project's earlier system prompt",
+                    "Project heuristic": "this project's own choice; not from an external source"}.items()))
         else:
             st.success("No flags raised.")
     with st.expander("Thresholds in use (edit them in pipeline/rules.py)"):
