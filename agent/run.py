@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from smolagents import CodeAgent, LiteLLMModel
 
+from agent import ledger
 from agent.tools import ALL_TOOLS, AGENT_TOOLS
+from agent.verify import annotate, summarize_report, verify_answer
 
 TOOL_NAMES = [t.name for t in ALL_TOOLS]
 
@@ -45,8 +47,19 @@ def build_agent(model_id="qwen2.5-coder:7b", base_url="http://127.0.0.1:11434", 
                      additional_authorized_imports=["json", "math"])
 
 
+def clean_answer(text):
+    """Drop 'Thought: ...' scaffolding the model sometimes leaks before 'Final answer:'."""
+    if not text:
+        return text
+    m = list(re.finditer(r"final answer\s*:\s*", text, re.I))
+    if m and re.match(r"\s*thought\s*:", text, re.I):
+        text = text[m[-1].end():]
+    return re.sub(r"</?code>\s*$", "", text).strip()
+
+
 def ask(agent, question):
     """Run one question; return the answer plus what the agent actually did."""
+    ledger.reset()
     started = time.time()
     error = None
     try:
@@ -56,9 +69,40 @@ def ask(agent, question):
     steps = list(agent.memory.steps)
     code = [getattr(s, "code_action", None) or "" for s in steps if hasattr(s, "tool_calls") or hasattr(s, "code_action")]
     used = sorted({n for c in code for n in TOOL_NAMES if re.search(rf"\b{n}\s*\(", c)})
-    return {"question": question, "answer": None if answer is None else str(answer), "error": error,
+    return {"question": question, "answer": None if answer is None else clean_answer(str(answer)), "error": error,
             "seconds": round(time.time() - started, 1), "steps": len([c for c in code if c]),
-            "tools_called": used, "code": code}
+            "tools_called": used, "code": code, "ledger": ledger.snapshot()}
+
+
+def ask_verified(agent, question, retry=True):
+    """ask() plus verification. One corrective retry when the answer contains unsupported figures.
+
+    Returns the final result dict with 'report' (the verifier's verdict), 'answer_annotated'
+    (problem figures tagged), and 'attempts' (every try, so nothing is hidden).
+    """
+    first = ask(agent, question)
+    first["report"] = verify_answer(first["answer"], first["ledger"])
+    attempts = [first]
+    final = first
+
+    if retry and first["answer"] and first["report"]["problems"]:
+        bad = ", ".join(f"{c['claim']} ({c['status']})" for c in first["report"]["problems"][:6])
+        nudge = (f"{question}\n\nYour previous answer contained figures that no tool returned or that sit under "
+                 f"the wrong label: {bad}. Answer again. Use only numbers from tool results; if a value was not "
+                 f"returned by a tool, say it is not available instead of stating a number.")
+        second = ask(agent, nudge)
+        second["report"] = verify_answer(second["answer"], second["ledger"])
+        attempts.append(second)
+        if second["answer"] and second["report"]["n_problems"] <= first["report"]["n_problems"]:
+            final = second
+
+    out = dict(final)
+    out["answer_annotated"] = annotate(final["answer"] or "", final["report"]) if final["answer"] else None
+    out["attempts"] = [{"answer": a["answer"], "verdict": a["report"]["verdict"],
+                        "problems": [c["claim"] for c in a["report"]["problems"]], "seconds": a["seconds"]}
+                       for a in attempts]
+    out["verification"] = summarize_report(final["report"])
+    return out
 
 
 def main():
@@ -69,9 +113,17 @@ def main():
     ap.add_argument("--verbosity", type=int, default=1)
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
     a = ap.parse_args()
-    result = ask(build_agent(a.model, max_steps=a.steps, verbosity=a.verbosity), a.question)
-    print(json.dumps(result, indent=1, ensure_ascii=False) if a.json else
-          f"\nANSWER: {result['answer']}\n[{result['seconds']}s, {result['steps']} steps, tools: {result['tools_called']}]")
+    result = ask_verified(build_agent(a.model, max_steps=a.steps, verbosity=a.verbosity), a.question)
+    if a.json:
+        print(json.dumps({k: v for k, v in result.items() if k not in ("code", "ledger")}, indent=1,
+                         ensure_ascii=False, default=str))
+    else:
+        print(f"\nANSWER: {result['answer_annotated'] or result['answer']}")
+        print(f"VERIFICATION: {result['verification']}")
+        for c in result["report"]["problems"]:
+            print(f"  ! {c['claim']}: {c['status']} ({c['source']})")
+        print(f"[{result['seconds']}s, {result['steps']} steps, tools: {result['tools_called']}, "
+              f"attempts: {len(result['attempts'])}]")
 
 
 if __name__ == "__main__":

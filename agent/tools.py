@@ -15,6 +15,7 @@ from smolagents import tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent.ledger import record as _record
 from tools import market as _market
 from tools import news as _news
 from tools import resolver as _resolver
@@ -86,7 +87,8 @@ def get_stock_snapshot(ticker: str) -> dict:
     """One-call overview of an NSE stock: price and momentum, valuation, business quality and risk.
     Prefer this for any question that mixes several of price, P/E, ROCE, debt, growth, beta or volatility,
     and for comparing stocks (call it once per stock).
-    Returns a dict: ok (True when data is usable), symbol, snapshot{current_price, 1m_change_pct, 3m_change_pct,
+    Returns a dict: ok (True when data is usable), symbol, snapshot{current_price, 52w_high, 52w_low,
+    pct_from_52w_high, 1m_change_pct, 3m_change_pct,
     trend_label, pe_ratio, pb_ratio, dividend_yield, market_cap_cr, roce_pct, roce_trend, roe, debt_to_equity,
     revenue_growth_pct, net_margin_pct, fcf_cr, beta, volatility_pct, max_drawdown_1y_pct}, caveats.
     Units: *_pct are percent, *_cr are INR crore, debt_to_equity is a plain ratio.
@@ -102,7 +104,8 @@ def get_stock_snapshot(ticker: str) -> dict:
     if not m:
         return _dump({"ok": False, "symbol": ticker, "snapshot": {},
                       "message": f"No live data found for '{ticker}' on NSE or BSE."})
-    keys = ("current_price", "1m_change_pct", "3m_change_pct", "trend_label", "pe_ratio", "pb_ratio",
+    keys = ("current_price", "52w_high", "52w_low", "pct_from_52w_high", "1m_change_pct", "3m_change_pct",
+            "trend_label", "pe_ratio", "pb_ratio",
             "dividend_yield", "market_cap_cr", "roce_pct", "roce_trend", "roe", "debt_to_equity",
             "revenue_growth_pct", "net_margin_pct", "fcf_cr", "beta", "volatility_pct", "max_drawdown_1y_pct")
     return _dump_matched({"ok": True, "symbol": ticker, "snapshot": {k: m.get(k) for k in keys},
@@ -229,3 +232,21 @@ ALL_TOOLS = [resolve_stock, get_stock_snapshot, get_price_momentum, get_valuatio
 # answered "ROCE: Not Available" without ever fetching it), so it gets the five it needs. The granular
 # tools stay in ALL_TOOLS for graph nodes that call them deterministically.
 AGENT_TOOLS = [get_stock_snapshot, get_market_regime, get_sector_benchmark, get_stock_news, resolve_stock]
+
+
+def _attach_ledger(tools):
+    """Make each tool record (name, args, full result) in the ledger whenever it is called.
+
+    Done on the Tool objects rather than with an extra decorator, which smolagents warns about.
+    """
+    for t in tools:
+        original = t.forward
+
+        def forward(*args, __orig=original, __name=t.name, **kwargs):
+            result = __orig(*args, **kwargs)
+            _record(__name, kwargs or list(args), result)
+            return result
+        t.forward = forward
+
+
+_attach_ledger(ALL_TOOLS)
