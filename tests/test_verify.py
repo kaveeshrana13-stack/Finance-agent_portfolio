@@ -18,6 +18,7 @@ def snap(symbol, **kw):
 
 LEDGER = [
     snap("TITAN", current_price=4455.8, pe_ratio=68.68, **{"1m_change_pct": -9.22}),
+    {"tool": "computed", "args": {}, "result": {"symbol": "TITAN", "vs_sector_1m_pct": -6.37}},
     snap("TCS"),
     snap("INFY", current_price=1450.0, pe_ratio=15.12, roce_pct=41.66, roce_trend="improving", beta=0.9),
     {"tool": "get_market_regime", "args": {}, "result": {
@@ -102,9 +103,9 @@ class Attacks(unittest.TestCase):
         self.assertEqual(r["verdict"], "unverified")
 
     def test_wrong_trend_word(self):
-        r, s = statuses("TCS's ROCE is improving.", ledger=[LEDGER[1]])      # tool says declining
+        r, s = statuses("TCS's ROCE is improving.", ledger=[LEDGER[2]])      # tool says declining
         self.assertEqual(r["verdict"], "unverified")
-        r, s = statuses("TCS's ROCE is declining.", ledger=[LEDGER[1]])
+        r, s = statuses("TCS's ROCE is declining.", ledger=[LEDGER[2]])
         self.assertEqual(r["verdict"], "verified")
 
     def test_trend_claimed_but_never_fetched(self):
@@ -160,6 +161,10 @@ class AdversarialTable(unittest.TestCase):
         (False, "NIFTY 50 closed at 31000.0."),                                              # a figure after the name
         (True, "TCS's 52-week high is 3350.0, and the price is -29.85% below it."),         # was a false alarm
         (True, "52-week high: 3350.0, price from 52-week high: -29.85%"),
+        (True, "The 1m change is 7.94% and the 3M change is -9.22%."),                       # window shorthand
+        (True, "TCS has a pe_ratio of 16.47 and roce_pct of 54.93."),                        # field-style names
+        (True, "Titan is 6.37 percentage points behind its sector."),                        # relative performance
+        (False, "TCS has a pe_ratio of 54.93."),                                             # still a mismatch
         (False, "TCS's 52-week high is ₹3,500."),                                            # never fetched
         (False, "TCS revenue growth is 2.1%."),                                              # 2.1 ~ dividend 2.08
         (False, "TCS P/E is about 17."),                                                     # 16.47 rounds to 16

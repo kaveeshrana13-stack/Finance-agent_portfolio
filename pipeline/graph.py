@@ -116,74 +116,95 @@ def _clean_note(item):
     }
 
 
-def _facts_for_prompt(state):
-    out = []
+_FIELD_LABELS = [
+    ("current_price", "Share price", "₹{}"), ("1m_change_pct", "1-month price change", "{}%"),
+    ("3m_change_pct", "3-month price change", "{}%"), ("pct_from_52w_high", "Distance from 52-week high", "{}%"),
+    ("pe_ratio", "P/E ratio", "{}"), ("roce_pct", "ROCE", "{}%"), ("roce_trend", "ROCE trend", "{}"),
+    ("debt_to_equity", "Debt-to-equity ratio", "{}"), ("revenue_growth_pct", "Revenue growth", "{}%"),
+    ("fcf_cr", "Free cash flow", "₹{} crore"), ("beta", "Beta against NIFTY 50", "{}"),
+    ("volatility_pct", "Annualised volatility", "{}%"),
+]
+_FIELD_NAME = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")      # snake_case tokens such as pe_ratio
+
+
+def _facts_text(state):
+    """The facts as plain labelled lines. The model copies what it sees, so it must not see field names."""
+    lines = []
+    regime = state.get("regime", {})
+    nifty = regime.get("nifty_returns_pct") or {}
+    lines.append(f"MARKET: regime {regime.get('regime')}; NIFTY 50 returned {nifty.get('1w')}% over 1 week, "
+                 f"{nifty.get('1m')}% over 1 month and {nifty.get('3m')}% over 3 months.")
     for r in state.get("resolved", []):
         f = state.get("facts", {}).get(r["symbol"])
         if not f:
             continue
         s = f["snapshot"]
-        keys = ("current_price", "1m_change_pct", "3m_change_pct", "pct_from_52w_high", "pe_ratio", "roce_pct",
-                "roce_trend", "debt_to_equity", "revenue_growth_pct", "fcf_cr", "beta", "volatility_pct")
-        entry = {
-            "symbol": r["symbol"], "company": r["company"], "sector": f["sector"],
-            "weight_pct": f.get("weight_pct"),
-            "metrics": {k: s.get(k) for k in keys if s.get(k) is not None},
-            "sector_benchmark": f.get("benchmark_name"),
-            "sector_1m_change_pct": f.get("sector_1m"),
-            "vs_sector_1m_pct": f.get("vs_sector_1m"),
-            "headlines": f.get("headlines", []),
-            "documents": [{"id": p["id"], "source": p["source"], "text": p["text"][:400]}
-                          for p in state.get("passages", {}).get(r["symbol"], [])],
-        }
-        out.append(entry)
-    return out
+        lines.append("")
+        w = f.get("weight_pct")
+        lines.append(f"{r['symbol']} ({r['company']}), sector {f['sector']}" + (f", {w}% of the portfolio" if w is not None else ""))
+        for key, label, fmt in _FIELD_LABELS:
+            v = s.get(key)
+            if v is None:
+                continue
+            lines.append(f"  - {label}: " + (v if isinstance(v, str) else fmt.format(v)))
+        if f.get("benchmark_name") and f.get("sector_1m") is not None:
+            lines.append(f"  - Sector benchmark ({f['benchmark_name']}), 1-month change: {f['sector_1m']}%")
+        if f.get("vs_sector_1m") is not None:
+            ahead = "ahead of" if f["vs_sector_1m"] >= 0 else "behind"
+            lines.append(f"  - Versus its sector over 1 month: {abs(f['vs_sector_1m'])} percentage points {ahead} the benchmark")
+        for h in f.get("headlines", []):
+            lines.append(f"  - Headline: {h}")
+        for p in state.get("passages", {}).get(r["symbol"], []):
+            lines.append(f"  - Document [{p['id']}] ({p['source']}): {p['text'][:400]}")
+    return "\n".join(lines)
 
 
 def _notes_prompt(state, problems=None):
-    facts = json.dumps({"market_regime": state.get("regime", {}).get("regime"),
-                        "nifty_returns_pct": state.get("regime", {}).get("nifty_returns_pct"),
-                        "holdings": _facts_for_prompt(state)}, ensure_ascii=False)
     fix = ""
     if problems:
-        fix = ("\nYOUR PREVIOUS ANSWER HAD FIGURES THAT ARE NOT IN THE FACTS: " + ", ".join(problems[:8]) +
-               ". Rewrite using only figures that appear in FACTS; drop any figure you cannot find there.\n")
+        fix = ("\nYOUR PREVIOUS ANSWER HAD PROBLEMS: " + "; ".join(problems[:8]) +
+               ". Rewrite it: copy figures exactly as written in FACTS, write plain English, and do not use field names.\n")
     return f"""FACTS (the only source of figures you may use):
-{facts}
+{_facts_text(state)}
 {fix}
 For EACH holding give a decision. Reply with JSON only, in this exact shape:
 {{"notes": [{{"symbol": "TCS", "action": "HOLD", "rationale": "...", "trigger": "..."}}]}}
 
 Rules:
-- action is one of HOLD, ADD, REDUCE, EXIT, REVIEW (use REVIEW when the facts are too thin to decide).
-- rationale: at most 40 words, using only figures present in FACTS. Mention how the stock compares with its sector benchmark when given.
-- trigger: one condition that would change the decision, stated as a trend, event or a figure already in FACTS.
-  Do NOT invent numeric thresholds.
-- If a metric is missing or says "not applicable", say so; do not guess it.
+- action is one of HOLD, ADD, REDUCE, EXIT, REVIEW (REVIEW when the facts are too thin to decide).
+- rationale: 1 or 2 plain-English sentences, at most 40 words. Copy figures exactly as shown in FACTS.
+  Say how the stock compares with its sector benchmark when that is given.
+- trigger: ONE full sentence beginning "Reconsider if" that names a trend or event that would change the decision
+  (for example "Reconsider if the ROCE trend turns declining."). Do NOT invent numeric thresholds.
+- Write every metric by its plain name exactly as labelled in FACTS ("P/E ratio", "1-month price change"). Never use underscores or code-style names.
+- If a metric is missing or says "not applicable", say that plainly; do not guess it.
 - Cite a document as [D1] only if you used it."""
 
 
 def _summary_prompt(state, problems=None):
     p = state["portfolio"]
-    facts = json.dumps({
-        "market_regime": state.get("regime", {}).get("regime"),
-        "nifty_returns_pct": state.get("regime", {}).get("nifty_returns_pct"),
-        "total_value": p["total_value"], "overall_return_pct": p["overall_return_pct"],
-        "sector_allocation_pct": p["sector_allocation"], "largest_sector": p["concentration"]["largest_sector"],
-        "largest_sector_pct": p["concentration"]["largest_sector_pct"],
-        "top_holding": p["concentration"]["top_holding_name"], "top_holding_pct": p["concentration"]["top_holding_pct"],
-        "beta_value_weighted": p["beta_value_weighted"], "data_quality": p["data_quality"],
-        "decisions": [{"symbol": n["symbol"], "action": n["action"]} for n in state.get("notes", [])],
-    }, ensure_ascii=False)
+    c = p["concentration"]
+    regime = state.get("regime", {})
+    alloc = ", ".join(f"{k} {v}%" for k, v in p["sector_allocation"].items())
+    decisions = ", ".join(f"{n['symbol']} {n['action']}" for n in state.get("notes", []))
+    facts = f"""Market regime: {regime.get('regime')}
+Total portfolio value: ₹{p['total_value']}
+Overall return on holdings with a known cost: {p['overall_return_pct']}%
+Sector weights: {alloc}
+Largest sector: {c['largest_sector']} at {c['largest_sector_pct']}% of the portfolio
+Largest holding: {c['top_holding_name']} at {c['top_holding_pct']}% of the portfolio
+Portfolio beta (value-weighted): {p['beta_value_weighted']}
+Decisions: {decisions}
+Data notes: {'; '.join(p['data_quality']) or 'none'}"""
     fix = ""
     if problems:
-        fix = ("\nYOUR PREVIOUS ANSWER HAD FIGURES NOT IN THE FACTS: " + ", ".join(problems[:8]) +
-               ". Use only figures that appear in FACTS.\n")
+        fix = ("\nYOUR PREVIOUS ANSWER HAD PROBLEMS: " + "; ".join(problems[:8]) +
+               ". Copy figures exactly as shown in FACTS and do not use field names.\n")
     return f"""FACTS:
 {facts}
 {fix}
-Write a portfolio summary in plain text, at most 90 words: overall position, the main concentration risk,
-and the one thing to watch next week. Use only figures from FACTS. No bullet points, no headings."""
+Write a portfolio summary in plain English, at most 90 words: overall position, the main concentration risk, and
+the one thing to watch next week. Copy figures exactly as shown in FACTS. No bullet points, no headings, no field names."""
 
 
 # --------------------------------------------------------------------------- the graph
@@ -330,8 +351,15 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None):
             rep = verify_answer(f"{n['rationale']} {n['trigger']}", facts_ledger)
             checked += len(rep["claims"])
             supported += rep["n_supported"] + rep["n_derived"]
-            problems += [f"{n['symbol']}: {c['claim']}" for c in rep["problems"]]
-            notes.append({**n, "verified": rep["n_problems"] == 0, "report": rep})
+            found = [f"{n['symbol']}: {c['claim']} is not supported by the facts" for c in rep["problems"]]
+            names = _FIELD_NAME.findall(f"{n['rationale']} {n['trigger']}")
+            if names:
+                found.append(f"{n['symbol']}: uses internal field names ({', '.join(names[:3])}); write plain English")
+            if n["action"] != "REVIEW" and len(n["trigger"].split()) < 4:
+                found.append(f"{n['symbol']}: the trigger is not a full sentence condition")
+            problems += found
+            notes.append({**n, "verified": rep["n_problems"] == 0 and not names and not (len(n["trigger"].split()) < 4 and n["action"] != "REVIEW"),
+                          "report": rep})
         final = (not problems) or state.get("notes_attempt", 1) >= MAX_ATTEMPTS
         if final:
             for n in notes:
@@ -362,7 +390,10 @@ def build_graph(toolbox=None, llm=None, kb=None, today=None):
         if not text:
             return {"summary_problems": []}
         rep = verify_answer(text, ledger.snapshot())
-        problems = [c["claim"] for c in rep["problems"]]
+        problems = [f"{c['claim']} is not supported by the facts" for c in rep["problems"]]
+        names = _FIELD_NAME.findall(text)
+        if names:
+            problems.append(f"uses internal field names ({', '.join(names[:3])}); write plain English")
         figs = dict(state.get("figures", {}))
         prev = figs.get("summary", {"checked": 0, "supported": 0})
         figs["summary"] = {"checked": len(rep["claims"]), "supported": rep["n_supported"] + rep["n_derived"],

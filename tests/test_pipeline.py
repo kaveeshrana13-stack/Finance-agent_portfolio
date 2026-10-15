@@ -174,6 +174,39 @@ class VerificationLoop(unittest.TestCase):
         self.assertEqual(out["summary_problems"], [])
 
 
+class PromptsAndStyle(unittest.TestCase):
+    def test_facts_are_shown_as_plain_labels_not_field_names(self):
+        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
+        run(llm)
+        prompt = llm.prompts[0]
+        self.assertIn("P/E ratio: 16.47", prompt)
+        self.assertIn("1-month price change: 7.94%", prompt)
+        self.assertIn("percentage points ahead of the benchmark", prompt)
+        for leak in ("pe_ratio", "roce_pct", "1m_change_pct", "vs_sector_1m_pct"):
+            self.assertNotIn(leak, prompt)
+
+    def test_field_names_in_a_note_trigger_one_retry(self):
+        leaky = notes_json(TCS={"rationale": "Its pe_ratio of 16.47 and roce_pct of 54.93 look fine."})
+        llm = ScriptedLLM([leaky, notes_json(), SUMMARY_OK])
+        out = run(llm)
+        self.assertEqual(len(llm.prompts), 3)
+        self.assertIn("internal field names", llm.prompts[1])
+        self.assertTrue(all(n["verified"] for n in out["notes"]))
+
+    def test_a_trigger_that_is_not_a_condition_is_a_problem(self):
+        bad = notes_json(TCS={"trigger": "pe_ratio"})
+        llm = ScriptedLLM([bad, bad, SUMMARY_OK])
+        out = run(llm)
+        tcs = next(n for n in out["notes"] if n["symbol"] == "TCS")
+        self.assertFalse(tcs["verified"])
+
+    def test_summary_facts_are_plain_text(self):
+        llm = ScriptedLLM([notes_json(), SUMMARY_OK])
+        run(llm)
+        self.assertIn("Total portfolio value: ₹", llm.prompts[1])
+        self.assertNotIn("total_value", llm.prompts[1])
+
+
 class Degradation(unittest.TestCase):
     def test_no_model_available_still_gives_a_report(self):
         llm = ScriptedLLM([AllModelsFailed([{"provider": "gemini", "model": "x", "error": "429"}])])

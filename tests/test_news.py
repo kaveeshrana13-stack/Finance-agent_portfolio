@@ -40,6 +40,14 @@ class SearchTerms(unittest.TestCase):
                          'intitle:"KPI Green Energy" site:moneycontrol.com/news when:3d')
 
 
+class Ambiguous(unittest.TestCase):
+    def test_itc_excludes_input_tax_credit_stories(self):
+        q = build_query(["ITC"])
+        self.assertIn('-"input tax credit"', q)
+        self.assertIn("-GST", q)
+        self.assertNotIn("-GST", build_query(["Infosys"]))
+
+
 class MultiQuery(unittest.TestCase):
     def test_one_query_per_term(self):
         qs = build_queries(["Tata Consultancy Services", "TCS"])

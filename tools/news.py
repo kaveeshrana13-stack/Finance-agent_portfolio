@@ -35,6 +35,9 @@ _TITLE_SUFFIX = re.compile(r"\s*-\s*Moneycontrol(\.com)?\s*$", re.I)
 _GENERIC_PAGE = re.compile(r"^(business news,|share/stock market news|stock market news)|latest nse, bse", re.I)
 _CORP_SUFFIX = re.compile(r"\b(limited|ltd\.?|corporation|corp\.?|company|co\.?)\b", re.I)
 
+# Symbols that are also ordinary terms. ITC is also "input tax credit": a GST story is not ITC Limited news.
+EXCLUDE = {"ITC": ['-"input tax credit"', "-GST", '-"tax credit"']}
+
 _cache = {}
 
 
@@ -68,7 +71,8 @@ def build_query(terms, days=DEFAULT_DAYS):
     """
     parts = [f'intitle:"{t}"' if " " in t else f"intitle:{t}" for t in terms]
     expr = parts[0] if len(parts) == 1 else "(" + " OR ".join(parts) + ")"
-    return f"{expr} site:{SITE} when:{days}d"
+    extra = " ".join(x for t in terms for x in EXCLUDE.get(t.upper(), []))
+    return f"{expr} site:{SITE} when:{days}d" + (f" {extra}" if extra else "")
 
 
 def build_queries(terms, days=DEFAULT_DAYS):

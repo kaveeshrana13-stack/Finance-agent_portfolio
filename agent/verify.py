@@ -72,6 +72,8 @@ def extract_numbers(text):
         if not has_unit and re.search(r"(?:nifty|sensex|bse|nse|midcap|smallcap|next|s&p|nasdaq|dow|bank\s*nifty)\s*$",
                                       before, re.I):
             continue                                                    # index names: NIFTY 50, BSE 500, Nifty Next 50
+        if not has_unit and decimals == 0 and re.match(r"^[mwyd](?:_|\b)", after, re.I):
+            continue                                                    # 1m, 3M, 52w, 1y: window shorthand
         if not has_unit and decimals == 0 and _COUNT_AFTER.match(after):
             continue                                                    # "2 stocks", "3 headlines"
         if re.search(r"[A-Za-z]$", text[max(0, start - 1):start]) and not m.group("cur"):
@@ -144,6 +146,8 @@ _LABELS = [
     (r"overall return|portfolio return|p&l|profit|loss\b", ("return", "pct")),
     (r"allocation|weight|concentrat|largest|top holding|top 5|top five|exposure|of the portfolio|of portfolio",
      ("weight", "allocation", "pct", "largest", "top")),
+    (r"vs\.?\s+(?:its\s+)?sector|versus|relative|outperform\w*|underperform\w*|ahead of|behind|percentage points?",
+     ("vs_", "relative", "sector", "pct", "nifty")),
     (r"52[- ]?w(?:ee)?k\s+high|year[- ]high|all[- ]time high|\bhigh\b", ("52w_high",)),
     (r"52[- ]?w(?:ee)?k\s+low|year[- ]low|all[- ]time low|\blow\b", ("52w_low",)),
     (r"share price|stock price|trad(?:es|ing|ed) at|closed at|quoted at|priced at|price\b|quote", ("current_price", "price")),
@@ -161,6 +165,7 @@ def _label_for(text, start, end):
     is carried over and flagged `inherited`, which makes a mismatch advisory instead of an error.
     A label after the figure ("54.93% ROCE") is used only when nothing precedes it.
     """
+    text = text.replace("_", " ")          # field-style names ("pe_ratio") must still match their labels
     sent_start = max((text.rfind(ch, 0, start) for ch in ".!?\n"), default=-1) + 1
     window = text[sent_start:start]
     best = None
