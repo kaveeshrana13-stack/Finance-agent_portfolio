@@ -1,6 +1,6 @@
 """Sector lookup: Yahoo Finance sector/industry mapped onto this app's sector names.
 
-The app's sector vocabulary (used by SECTOR_TO_INDEX and POLICY_NARRATIVES) is:
+The app's sector vocabulary (used by SECTOR_BENCHMARKS in tools/market.py and POLICY_NARRATIVES) is:
 IT, Banking, Pharma, FMCG, Auto, Energy, Metal, Infrastructure, Financial Services,
 Cement, Aviation, Defence, Chemicals. Anything Yahoo reports outside that vocabulary is
 returned under Yahoo's own sector name with mapped=False, so no information is lost.

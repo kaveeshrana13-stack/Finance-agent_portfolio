@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from tools._yf import YFINANCE_AVAILABLE
-from tools.market import SECTOR_TO_INDEX, fetch_index_returns
+from tools.market import fetch_index_returns, get_sector_benchmark
 from tools.stocks import fetch_stock_metrics_yf
 
 
@@ -80,9 +80,8 @@ def compute_portfolio_metrics(portfolio_df, on_progress=None):
             }
             result.update(metrics)
 
-            # Fetch sector benchmark
-            sector_index = SECTOR_TO_INDEX.get(row['sector'], "NIFTY 50")
-            sector_returns = fetch_index_returns(sector_index)
+            # Sector benchmark: a real index, an ETF stand-in, a basket, or none (never NIFTY by default)
+            sector_bench = get_sector_benchmark(row['sector'])
 
             # Add benchmark data
             if nifty_returns:
@@ -90,11 +89,15 @@ def compute_portfolio_metrics(portfolio_df, on_progress=None):
                 result['nifty_1m'] = nifty_returns.get('1m')
                 result['nifty_3m'] = nifty_returns.get('3m')
 
-            if sector_returns:
+            if sector_bench["available"]:
+                sector_returns = sector_bench["returns"]
                 result['sector_1w'] = sector_returns.get('1w')
                 result['sector_1m'] = sector_returns.get('1m')
                 result['sector_3m'] = sector_returns.get('3m')
-                result['sector_index_name'] = sector_index
+                result['sector_index_name'] = sector_bench["name"]
+                result['sector_benchmark_kind'] = sector_bench["kind"]
+            else:
+                result['sector_benchmark_note'] = sector_bench["note"]
 
             # Calculate relative performance
             stock_1m = result.get('1m_change_pct')

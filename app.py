@@ -15,10 +15,8 @@ from tools.tickers import clean_ticker_symbol
 from tools.resolver import resolve_stock
 from tools.sector_map import lookup_sector
 from tools.market import (
-    SECTOR_TO_INDEX,
     fetch_index_returns,
     classify_market_regime,
-    classify_sector_leadership,
 )
 from tools.stocks import fetch_stock_metrics_yf
 from tools.sectors import POLICY_NARRATIVES, get_sector_narrative
@@ -153,20 +151,17 @@ Portfolio Context:
     
     # Add benchmark context
     benchmark_info = ""
-    sector_leadership = "Unknown"
     if benchmarks:
-        stock_1m = benchmarks.get('stock_1m', 0) or 0
-        nifty_1m = benchmarks.get('nifty_1m', 0) or 0
-        sector_leadership = classify_sector_leadership(benchmarks.get('sector_1m'), nifty_1m, "1M")
-        
+        sector_benchmark = benchmarks.get('sector_benchmark') or "none available"
+
         benchmark_info = f"""
 Benchmark Performance:
 - Stock: 1W: {benchmarks.get('stock_1w', 'N/A')}% | 1M: {benchmarks.get('stock_1m', 'N/A')}% | 3M: {benchmarks.get('stock_3m', 'N/A')}%
-- Sector: 1W: {benchmarks.get('sector_1w', 'N/A')}% | 1M: {benchmarks.get('sector_1m', 'N/A')}% | 3M: {benchmarks.get('sector_3m', 'N/A')}%
+- Sector ({sector_benchmark}): 1W: {benchmarks.get('sector_1w', 'N/A')}% | 1M: {benchmarks.get('sector_1m', 'N/A')}% | 3M: {benchmarks.get('sector_3m', 'N/A')}%
 - NIFTY 50: 1W: {benchmarks.get('nifty_1w', 'N/A')}% | 1M: {benchmarks.get('nifty_1m', 'N/A')}% | 3M: {benchmarks.get('nifty_3m', 'N/A')}%
 
 Relative Performance:
-- vs Sector (1M): {benchmarks.get('vs_sector_1m', 'N/A')}% - Sector is {sector_leadership}
+- vs Sector (1M): {benchmarks.get('vs_sector_1m', 'N/A')}%
 - vs NIFTY (1M): {benchmarks.get('vs_nifty_1m', 'N/A')}%
 """
     
@@ -226,7 +221,6 @@ Key Metrics:
 
 1. MARKET CONTEXT
 - Current regime: {market_regime.get('regime', 'Unknown') if market_regime else 'Unknown'}
-- Sector leadership: {sector_leadership}
 - This stock vs sector: {benchmarks.get('vs_sector_1m', 'N/A') if benchmarks else 'N/A'}%
 - This stock vs NIFTY: {benchmarks.get('vs_nifty_1m', 'N/A') if benchmarks else 'N/A'}%
 
@@ -942,6 +936,7 @@ Respond:"""
                             'nifty_1w': row.get('nifty_1w'),
                             'nifty_1m': row.get('nifty_1m'),
                             'nifty_3m': row.get('nifty_3m'),
+                            'sector_benchmark': row.get('sector_index_name'),
                             'vs_sector_1m': row.get('vs_sector_1m'),
                             'vs_nifty_1m': row.get('vs_nifty_1m')
                         }
