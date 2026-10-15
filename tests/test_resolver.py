@@ -59,6 +59,19 @@ class ResolveStock(unittest.TestCase):
         self.assertIsNone(r["symbol"])
         self.assertEqual({c["symbol"] for c in r["candidates"]}, {"TMPV", "TMCV"})
 
+    def test_stale_symbol_is_not_guessed_into_a_company(self):
+        """Regression: TATAMOTORS was fuzzy-matched to TMCV and its P/E reported as 'Tata Motors'."""
+        r = resolve_stock("TATAMOTORS")
+        self.assertEqual(r["status"], "ambiguous")
+        self.assertIsNone(r["symbol"])
+        self.assertEqual({c["symbol"] for c in r["candidates"]}, {"TMPV", "TMCV"})
+
+    def test_uppercase_typo_asks_but_normal_case_typo_resolves(self):
+        upper = resolve_stock("INFOSIS")                  # looks like a ticker -> do not guess
+        self.assertEqual(upper["status"], "ambiguous")
+        self.assertEqual([c["symbol"] for c in upper["candidates"]], ["INFY"])
+        self.assertEqual(resolve_stock("Infosis")["symbol"], "INFY")   # looks like a name -> fuzzy is fine
+
     def test_generic_prefix_is_ambiguous(self):
         r = resolve_stock("HDFC")
         self.assertEqual(r["status"], "ambiguous")

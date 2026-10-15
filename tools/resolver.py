@@ -32,6 +32,7 @@ ALIASES = {
     "l&t": ["LT"],
     "larsen": ["LT"],
     "tata motors": ["TMPV", "TMCV"],  # demerged: passenger vs commercial vehicles
+    "tatamotors": ["TMPV", "TMCV"],   # the old symbol, which people (and LLMs) still type
     "airtel": ["BHARTIARTL"],
     "sbi": ["SBIN"],
     "hul": ["HINDUNILVR"],
@@ -251,6 +252,13 @@ def resolve_stock(query):
         best, runner = scored[0], (scored[1] if len(scored) > 1 else None)
         unique = len(by_name[best[1]]) == 1
         clear_winner = runner is None or (best[0] >= 0.88 and best[0] - runner[0] >= 0.04)
+        # An ALL-CAPS single token is meant as a ticker. If it is not a current symbol it is probably a
+        # stale or wrong one (TATAMOTORS), so never turn it into a company by similarity: ask instead.
+        symbol_shaped = bool(re.fullmatch(r"[A-Z0-9&\-]{2,15}", q)) and q == q.upper()
+        if symbol_shaped:
+            syms = [s for _, n in scored for s in by_name[n]]
+            return _ambiguous(query, syms, rows, "fuzzy",
+                              note=f"'{q}' is not a current NSE symbol. Did you mean one of these?")
         if unique and clear_winner:
             sym = by_name[best[1]][0]
             confidence = "medium" if best[0] >= 0.88 else "low"

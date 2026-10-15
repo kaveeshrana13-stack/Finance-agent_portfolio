@@ -71,6 +71,13 @@ def build_query(terms, days=DEFAULT_DAYS):
     return f"{expr} site:{SITE} when:{days}d"
 
 
+def build_queries(terms, days=DEFAULT_DAYS):
+    """One query per term. A single query joining terms with OR intermittently came back empty
+    from Google (the same query returned 10 items, then 0 with identical bytes), while each term
+    on its own was reliable."""
+    return [build_query([t], days) for t in terms]
+
+
 def parse_feed(raw):
     """RSS bytes -> [{title, date (aware datetime), link}].
 
@@ -148,11 +155,11 @@ def get_stock_news(ticker_or_name, company_name=None, days=DEFAULT_DAYS):
         for t in search_terms(company_name=extra):
             if len(terms) < MAX_TERMS and t.lower() not in {x.lower() for x in terms}:
                 terms.append(t)
-    query = build_query(terms, days)
+    queries = build_queries(terms, days)
 
     def envelope(status, items, warnings):
         return {
-            "status": status, "symbol": symbol, "query": query,
+            "status": status, "symbol": symbol, "query": " || ".join(queries),
             "as_of": datetime.now().isoformat(timespec="seconds"),
             "source": SOURCE_NAME,
             "data": {"count": len(items), "window_days": days,
@@ -161,12 +168,20 @@ def get_stock_news(ticker_or_name, company_name=None, days=DEFAULT_DAYS):
             "warnings": warnings,
         }
 
-    try:
-        items = select_items(parse_feed(_fetch_feed(query)), days=days)
-    except (urllib.error.URLError, TimeoutError, ET.ParseError, OSError) as e:
-        return envelope("error", [], [f"Could not fetch news ({type(e).__name__}: {e})."])
+    collected, failures = [], []
+    for q in queries:
+        try:
+            collected.extend(parse_feed(_fetch_feed(q)))
+        except (urllib.error.URLError, TimeoutError, ET.ParseError, OSError) as e:
+            failures.append(f"{type(e).__name__}: {e}")
 
+    if failures and len(failures) == len(queries):
+        return envelope("error", [], [f"Could not fetch news ({failures[0]})."])
+
+    items = select_items(collected, days=days)
     warnings = []
+    if failures:
+        warnings.append(f"{len(failures)} of {len(queries)} news queries failed; results may be incomplete.")
     if not items:
         warnings.append(f"No Moneycontrol headlines found in the last {days} days.")
-    return envelope("ok", items, warnings)
+    return envelope("partial" if failures else "ok", items, warnings)

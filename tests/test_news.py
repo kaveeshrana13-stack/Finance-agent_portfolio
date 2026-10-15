@@ -1,12 +1,14 @@
 """Offline tests for the news tool (no network)."""
 import sys
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.news import build_query, parse_feed, search_terms, select_items
+import tools.news as N
+from tools.news import build_queries, build_query, parse_feed, search_terms, select_items
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 
@@ -36,6 +38,48 @@ class SearchTerms(unittest.TestCase):
                          "(intitle:Infosys OR intitle:INFY) site:moneycontrol.com/news when:7d")
         self.assertEqual(build_query(["KPI Green Energy"], days=3),
                          'intitle:"KPI Green Energy" site:moneycontrol.com/news when:3d')
+
+
+class MultiQuery(unittest.TestCase):
+    def test_one_query_per_term(self):
+        qs = build_queries(["Tata Consultancy Services", "TCS"])
+        self.assertEqual(qs, ['intitle:"Tata Consultancy Services" site:moneycontrol.com/news when:7d',
+                              "intitle:TCS site:moneycontrol.com/news when:7d"])
+
+    def test_results_from_every_query_are_merged_and_deduped(self):
+        feeds = {
+            'intitle:"Tata Consultancy Services" site:moneycontrol.com/news when:7d':
+                rss(("TCS wins deal - Moneycontrol.com", "Wed, 14 Oct 2026 09:00:00 GMT")),
+            "intitle:TCS site:moneycontrol.com/news when:7d":
+                rss(("TCS wins deal - Moneycontrol.com", "Wed, 14 Oct 2026 09:00:00 GMT"),
+                    ("TCS Q2 preview - Moneycontrol.com", "Thu, 15 Oct 2026 08:00:00 GMT")),
+        }
+        with unittest.mock.patch.object(N, "_fetch_feed", lambda q, timeout=15: feeds[q]), \
+             unittest.mock.patch.object(N, "datetime") as dt:
+            dt.now.side_effect = lambda tz=None: NOW if tz else NOW.replace(tzinfo=None)
+            r = N.get_stock_news("TCS")
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual([i["title"] for i in r["data"]["items"]], ["TCS Q2 preview", "TCS wins deal"])
+
+    def test_one_failed_query_is_partial_not_fatal(self):
+        def fetch(q, timeout=15):
+            if "Tata Consultancy" in q:
+                raise N.urllib.error.URLError("boom")
+            return rss(("TCS Q2 preview - Moneycontrol.com", "Thu, 15 Oct 2026 08:00:00 GMT"))
+        with unittest.mock.patch.object(N, "_fetch_feed", fetch), unittest.mock.patch.object(N, "datetime") as dt:
+            dt.now.side_effect = lambda tz=None: NOW if tz else NOW.replace(tzinfo=None)
+            r = N.get_stock_news("TCS")
+        self.assertEqual(r["status"], "partial")
+        self.assertEqual(r["data"]["count"], 1)
+        self.assertTrue(any("failed" in w for w in r["warnings"]))
+
+    def test_all_queries_failing_is_an_error(self):
+        def fetch(q, timeout=15):
+            raise N.urllib.error.URLError("down")
+        with unittest.mock.patch.object(N, "_fetch_feed", fetch):
+            r = N.get_stock_news("TCS")
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["data"]["count"], 0)
 
 
 class ParseAndSelect(unittest.TestCase):
